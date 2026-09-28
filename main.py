@@ -424,6 +424,7 @@ class AnalyzeResponse(BaseModel):
     mercado: Optional[MarketReport] = None
     videos: List[VideoInfo] = []
     restantes: Optional[int] = None   # análisis de prueba que le quedan al invitado
+    comentarios: List[str] = []       # texto crudo extraído (para copiar o pasar al Analista)
 
 
 
@@ -732,15 +733,17 @@ CEREBROS = {
         "nombre": "Radar",
         "modo": "rapido",
         "lema": "Escucha lo que tu mercado ya está diciendo",
-        "desc": "Lee cientos de comentarios reales y los ordena en dolores, objeciones y deseos, con citas textuales.",
+        "desc": "Extrae comentarios de YouTube o Facebook y los ordena en dolores, objeciones y deseos. Al final puedes copiarlos todos o mandarlos al Analista.",
         "tiempo": "30 s a 3 min",
+        "fuentes": ["yt-search", "yt-video", "facebook", "paste"],
     },
     "analista": {
         "nombre": "Analista de Mercado",
         "modo": "mercado",
         "lema": "Del dolor al producto, en 8 pasos",
-        "desc": "Detecta el problema urgente específico, propone el producto con su mecanismo único y da un veredicto: crear o no crear.",
+        "desc": "Pega aquí los comentarios (o tráelos desde el Radar). Detecta el problema urgente específico, propone el producto con su mecanismo único y da un veredicto: crear o no crear.",
         "tiempo": "1 a 4 min",
+        "fuentes": ["paste"],
     },
 }
 
@@ -879,6 +882,12 @@ RESULT_CSS = """
   .fbbox textarea { min-height: 90px; margin-top: 12px; }
   .fbrow { display: flex; gap: 8px; margin-top: 12px; }
   .fbrow .tab[aria-pressed="true"] { background: var(--naranja); border-color: var(--naranja); color: #fff; }
+  .extraidos .acciones { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .extraidos .tab { cursor: pointer; }
+  .extraidos .tab.destacado { background: var(--naranja); border-color: var(--naranja); color: #fff; }
+  .crudos { background: var(--papel); border: 1px solid var(--linea); border-radius: 14px; padding: 16px;
+    max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    font: 14px/1.5 "Instrument Sans", sans-serif; color: #33445c; margin: 0; }
   .sources a { display: block; background: var(--papel); border: 1px solid var(--linea); border-radius: 14px;
     padding: 14px 18px; margin-bottom: 10px; text-decoration: none; }
   .sources small { color: var(--gris); display: block; }
@@ -915,7 +924,7 @@ def _nombre_visible(user: str) -> str:
     return user.split("@")[0]
 
 
-def topbar(user: Optional[str], con_lateral: bool) -> str:
+def topbar(user: Optional[str], con_lateral: bool, mostrar_entrar: bool = True) -> str:
     hamb = '<button class="hamb" id="hamb" aria-label="Mostrar u ocultar el menú">☰</button>' if con_lateral else ""
     if user:
         nombre = _nombre_visible(user)
@@ -928,8 +937,10 @@ def topbar(user: Optional[str], con_lateral: bool) -> str:
           <span class="avatar">{inicial}</span>
           <span class="nombre-usuario">{nombre}</span>
           <a class="btn-sesion" href="/logout">Salir</a></div>"""
-    else:
+    elif mostrar_entrar:
         derecha = '<a class="btn-sesion primario" href="/login">Entrar</a>'
+    else:
+        derecha = ""
     return f"""<header class="topbar">{hamb}
       <a class="marca" href="/">TΛLENO <b>OS</b></a>
       <span class="sp"></span>{derecha}</header>"""
@@ -956,7 +967,8 @@ def sidebar(user: str, activo: str = "") -> str:
 
 
 def page(title: str, contenido: str, user: Optional[str] = None, activo: str = "",
-         extra_css: str = "", script: str = "", con_lateral: bool = True) -> str:
+         extra_css: str = "", script: str = "", con_lateral: bool = True,
+         mostrar_entrar: bool = True) -> str:
     lateral = sidebar(user, activo) if (con_lateral and user) else ""
     clase = "contenido" if lateral else "contenido solo"
     return f"""<!DOCTYPE html>
@@ -967,7 +979,7 @@ def page(title: str, contenido: str, user: Optional[str] = None, activo: str = "
 {FONTS}
 <style>{BASE_CSS}{extra_css}</style>
 </head><body>
-{topbar(user, bool(lateral))}
+{topbar(user, bool(lateral), mostrar_entrar)}
 {lateral}
 <main class="{clase}">{contenido}</main>
 <script>{SHELL_JS}{script}</script>
@@ -989,7 +1001,7 @@ const SOURCES = {
     wait: "Leyendo comentarios de Facebook.", body: () => ({ url: el("field").value.trim() }) },
 };
 const el = (id) => document.getElementById(id);
-let src = "paste";
+let src = "__INICIAL__";
 
 function setSource(s) {
   src = s; const cfg = SOURCES[s];
@@ -1008,6 +1020,54 @@ el("texto").addEventListener("input", () => {
   el("counter").textContent = `${n} comentarios detectados` + (n && n < 50 ? " · con menos de 50 el análisis será poco confiable" : "");
 });
 setSource(src);
+
+// Si venimos del Radar, precargamos los comentarios que trajo
+try {
+  const traidos = sessionStorage.getItem("comentarios_radar");
+  if (traidos && el("texto")) {
+    sessionStorage.removeItem("comentarios_radar");
+    el("texto").value = traidos;
+    el("texto").dispatchEvent(new Event("input"));
+    el("status").textContent = "Comentarios traídos del Radar. Dale a Analizar.";
+    el("texto").scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+} catch (e) {}
+
+let comentariosExtraidos = [];
+
+function bloqueComentarios(data) {
+  if (!data.comentarios || !data.comentarios.length) return "";
+  comentariosExtraidos = data.comentarios;
+  return `<section class="extraidos">
+    <h2>Comentarios extraídos <span class="count">(${data.comentarios.length})</span></h2>
+    <div class="acciones">
+      <button type="button" class="tab" id="copiar">⧉ Copiar todos</button>
+      <button type="button" class="tab destacado" id="alAnalista">→ Analizar con el Analista</button>
+    </div>
+    <p id="copiaStatus" class="counter"></p>
+    <pre class="crudos">${esc(data.comentarios.join("\\n"))}</pre>
+  </section>`;
+}
+
+function conectarBotones() {
+  const copiar = el("copiar"), alAnalista = el("alAnalista");
+  if (copiar) copiar.addEventListener("click", async () => {
+    const texto = comentariosExtraidos.join("\\n");
+    try {
+      await navigator.clipboard.writeText(texto);
+      el("copiaStatus").textContent = `${comentariosExtraidos.length} comentarios copiados al portapapeles.`;
+    } catch (err) {
+      const ta = document.createElement("textarea");
+      ta.value = texto; document.body.appendChild(ta); ta.select();
+      document.execCommand("copy"); ta.remove();
+      el("copiaStatus").textContent = "Comentarios copiados.";
+    }
+  });
+  if (alAnalista) alAnalista.addEventListener("click", () => {
+    try { sessionStorage.setItem("comentarios_radar", comentariosExtraidos.join("\\n")); } catch (e) {}
+    window.location.href = "/cerebro/analista";
+  });
+}
 
 function esc(t) { const d = document.createElement("div"); d.textContent = t ?? ""; return d.innerHTML; }
 const quotes = (arr, c) => (arr || []).map(q => `<blockquote style="--c:${c}">“${esc(q)}”</blockquote>`).join("");
@@ -1030,7 +1090,7 @@ function renderRadar(data) {
     for (const it of items) html += `<div class="item"><div class="item-head"><h3>${esc(it.tema)}</h3><span class="freq">Frecuencia ${esc(it.frecuencia)}</span></div>${quotes(it.ejemplos, color)}</div>`;
     html += `</section>`;
   }
-  return html + fuentes(data);
+  return html + bloqueComentarios(data) + fuentes(data);
 }
 
 function colorVeredicto(rec) {
@@ -1117,6 +1177,7 @@ el("form").addEventListener("submit", async (e) => {
     }
     el("status").textContent = "";
     el("results").innerHTML = data.mercado ? renderAnalista(data) : renderRadar(data);
+    conectarBotones();
     el("results").scrollIntoView({ behavior: "smooth", block: "start" });
     el("fbBox").hidden = false;
     if (data.restantes !== null && data.restantes !== undefined) {
@@ -1202,7 +1263,8 @@ def login_page(msg: str = "") -> str:
       <p id="status" class="status"></p>
       {invitado}
     </div>"""
-    return page("Entrar · TΛLENO OS", contenido, None, "", LOGIN_CSS, LOGIN_JS, con_lateral=False)
+    return page("Entrar · TΛLENO OS", contenido, None, "", LOGIN_CSS, LOGIN_JS,
+                con_lateral=False, mostrar_entrar=False)
 
 
 DASH_CSS = """
@@ -1276,18 +1338,26 @@ def leads_page(user: str) -> str:
 
 def brain_page(slug: str, user: str) -> str:
     c = CEREBROS[slug]
-    tab_fb = ("" if (is_guest(user) and not GUEST_FULL)
-              else '<button class="tab" data-src="facebook" aria-pressed="false">Facebook</button>')
+    etiquetas = {
+        "paste": "Pegar comentarios",
+        "yt-search": "Buscar en YouTube",
+        "yt-video": "Video de YouTube",
+        "facebook": "Facebook",
+    }
+    fuentes = [f for f in c.get("fuentes", ["paste"])
+               if not (f == "facebook" and is_guest(user) and not GUEST_FULL)]
+    primera = fuentes[0]
+    if len(fuentes) > 1:
+        botones = "".join(
+            f'<button class="tab" data-src="{f}" aria-pressed="{"true" if f == primera else "false"}">{etiquetas[f]}</button>'
+            for f in fuentes)
+        selector = f'<div class="label">Fuente de los comentarios</div><div class="tabs" id="sources">{botones}</div>'
+    else:
+        selector = f'<div class="tabs" id="sources" hidden><button class="tab" data-src="{primera}" aria-pressed="true"></button></div>'
+
     contenido = f"""<h1>{c['nombre']}</h1>
       <p class="intro">{c['desc']}</p>
-
-      <div class="label">Fuente de los comentarios</div>
-      <div class="tabs" id="sources">
-        <button class="tab" data-src="paste" aria-pressed="true">Pegar comentarios</button>
-        <button class="tab" data-src="yt-search" aria-pressed="false">Buscar en YouTube</button>
-        <button class="tab" data-src="yt-video" aria-pressed="false">Video de YouTube</button>
-        {tab_fb}
-      </div>
+      {selector}
       <p id="hint" class="hint"></p>
 
       <form id="form">
@@ -1318,8 +1388,8 @@ def brain_page(slug: str, user: str) -> str:
         <button type="button" id="fbEnviar" class="submit">Enviar comentario</button>
         <p id="fbStatus" class="status"></p>
       </div>"""
-    return page(f"{c['nombre']} · TΛLENO OS", contenido, user, slug, RESULT_CSS,
-                BRAIN_JS.replace("__MODO__", c["modo"]))
+    script = BRAIN_JS.replace("__MODO__", c["modo"]).replace("__INICIAL__", primera)
+    return page(f"{c['nombre']} · TΛLENO OS", contenido, user, slug, RESULT_CSS, script)
 
 
 # ---------------------------------------------------------------------------
@@ -1336,7 +1406,8 @@ async def build_response(fuente, consulta, comments, modo, result, user, videos=
         restantes = await lead_consumir_uso(guest_email(user))
     return AnalyzeResponse(
         fuente=fuente, consulta=consulta, total_comentarios=len(comments),
-        modelo=GEMINI_MODEL, modo=modo, videos=videos or [], restantes=restantes, **result,
+        modelo=GEMINI_MODEL, modo=modo, videos=videos or [], restantes=restantes,
+        comentarios=comments if modo == "rapido" else [], **result,
     )
 
 
