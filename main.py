@@ -126,8 +126,18 @@ def _sb_headers() -> dict:
 _sb_ultimo_error = {"detalle": ""}
 
 
+def _sb_url() -> str:
+    """Arma la URL de la tabla aunque la variable traiga /rest/v1 o barras de más."""
+    base = (SUPABASE_URL or "").strip().strip('"').strip("'").rstrip("/")
+    for sufijo in ("/rest/v1/leads", "/rest/v1", "/rest"):
+        if base.endswith(sufijo):
+            base = base[: -len(sufijo)]
+            break
+    return f"{base.rstrip('/')}/rest/v1/leads"
+
+
 def _sb(metodo: str, params: dict = None, payload=None) -> list:
-    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/leads"
+    url = _sb_url()
     try:
         with httpx.Client(timeout=15, headers=_sb_headers()) as client:
             resp = client.request(metodo, url, params=params, json=payload)
@@ -1557,6 +1567,9 @@ async def supabase_test(request: Request):
     leido = lead_get(correo)
     return {
         "almacen": "supabase",
+        "url_usada": _sb_url(),
+        "url_configurada": (SUPABASE_URL or "").strip(),
+        "largo_de_la_clave": len(SUPABASE_KEY or ""),
         "escritura_ok": not error_escritura,
         "error_escritura": error_escritura,
         "lectura_ok": bool(leido),
