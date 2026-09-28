@@ -63,6 +63,8 @@ LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
 SYSTEME_API_KEY = os.getenv("SYSTEME_API_KEY")           # clave de systeme.io (Settings → Public API keys)
 SYSTEME_TAG_ID = os.getenv("SYSTEME_TAG_ID")             # id del tag que quieres aplicar (opcional)
 SYSTEME_API = "https://api.systeme.io/api"
+SUPABASE_URL = os.getenv("SUPABASE_URL")                 # https://xxxx.supabase.co
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")                 # clave service_role (nunca en el repo)
 
 def _load_users() -> dict:
     """APP_USERS="rich@correo.com:clave,ana@correo.com:otra". Alternativa simple: APP_PASSWORD."""
@@ -108,9 +110,35 @@ def current_user(request: Request) -> Optional[str]:
 # ---------------------------------------------------------------------------
 _leads_lock = asyncio.Lock()
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[a-zA-Z]{2,}$")
+USA_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
 
 
-def _read_leads() -> dict:
+# --- Supabase (si está configurado) ---------------------------------------
+def _sb_headers() -> dict:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation,resolution=merge-duplicates",
+    }
+
+
+def _sb(metodo: str, params: dict = None, payload=None) -> list:
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/leads"
+    try:
+        with httpx.Client(timeout=15, headers=_sb_headers()) as client:
+            resp = client.request(metodo, url, params=params, json=payload)
+        if resp.status_code >= 400:
+            logger.warning("Supabase %s -> %s: %s", metodo, resp.status_code, resp.text[:200])
+            return []
+        return resp.json() if resp.text else []
+    except Exception:
+        logger.exception("Supabase: error de conexión")
+        return []
+
+
+# --- Archivo local (respaldo cuando no hay Supabase) ----------------------
+def _read_file_leads() -> dict:
     try:
         with open(LEADS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -118,7 +146,7 @@ def _read_leads() -> dict:
         return {}
 
 
-def _write_leads(data: dict):
+def _write_file_leads(data: dict):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         with open(LEADS_FILE, "w", encoding="utf-8") as f:
@@ -127,55 +155,79 @@ def _write_leads(data: dict):
         logger.exception("No se pudieron guardar los leads")
 
 
-async def lead_marcar_systeme(email: str, ok: bool):
-    async with _leads_lock:
-        data = _read_leads()
-        if email in data:
-            data[email]["systeme"] = ok
-            _write_leads(data)
+# --- API interna: igual para los dos almacenes ----------------------------
+def _lead_nuevo(email: str, nombre: str = "") -> dict:
+    return {"email": email, "nombre": nombre, "creado": datetime.now(timezone.utc).isoformat(),
+            "usos": 0, "systeme": False, "feedback": []}
+
+
+def _read_leads() -> dict:
+    """Todos los leads, indexados por correo."""
+    if USA_SUPABASE:
+        filas = _sb("GET", params={"select": "*", "order": "creado.desc"})
+        return {f["email"]: f for f in filas if f.get("email")}
+    return _read_file_leads()
+
+
+def lead_get(email: str) -> Optional[dict]:
+    if USA_SUPABASE:
+        filas = _sb("GET", params={"email": f"eq.{email}", "select": "*", "limit": 1})
+        return filas[0] if filas else None
+    return _read_file_leads().get(email)
+
+
+def _lead_upsert(lead: dict):
+    if USA_SUPABASE:
+        _sb("POST", payload=lead)
+        return
+    data = _read_file_leads()
+    data[lead["email"]] = lead
+    _write_file_leads(data)
+
+
+def lead_usos(email: str) -> int:
+    lead = lead_get(email)
+    return int((lead or {}).get("usos", 0) or 0)
 
 
 async def lead_guardar(email: str, nombre: str) -> dict:
     async with _leads_lock:
-        data = _read_leads()
-        lead = data.get(email) or {"email": email, "nombre": nombre, "creado": datetime.now(timezone.utc).isoformat(),
-                                   "usos": 0, "feedback": []}
+        lead = lead_get(email) or _lead_nuevo(email, nombre)
         if nombre:
             lead["nombre"] = nombre
-        data[email] = lead
-        _write_leads(data)
+        _lead_upsert(lead)
         return lead
 
 
 async def lead_consumir_uso(email: str) -> int:
     """Suma un uso y devuelve cuántos le quedan."""
     async with _leads_lock:
-        data = _read_leads()
-        lead = data.get(email) or {"email": email, "nombre": "", "creado": datetime.now(timezone.utc).isoformat(),
-                                   "usos": 0, "feedback": []}
-        lead["usos"] = int(lead.get("usos", 0)) + 1
+        lead = lead_get(email) or _lead_nuevo(email)
+        lead["usos"] = int(lead.get("usos", 0) or 0) + 1
         lead["ultimo_uso"] = datetime.now(timezone.utc).isoformat()
-        data[email] = lead
-        _write_leads(data)
+        _lead_upsert(lead)
         return max(GUEST_LIMIT - lead["usos"], 0)
 
 
-def lead_usos(email: str) -> int:
-    return int(_read_leads().get(email, {}).get("usos", 0))
+async def lead_marcar_systeme(email: str, ok: bool):
+    async with _leads_lock:
+        lead = lead_get(email)
+        if not lead:
+            return
+        lead["systeme"] = ok
+        _lead_upsert(lead)
 
 
 async def lead_feedback(email: str, util: Optional[bool], texto: str):
     async with _leads_lock:
-        data = _read_leads()
-        lead = data.get(email)
+        lead = lead_get(email)
         if not lead:
             return
-        lead.setdefault("feedback", []).append({
-            "util": util, "texto": texto[:1000],
-            "fecha": datetime.now(timezone.utc).isoformat(),
-        })
-        data[email] = lead
-        _write_leads(data)
+        historial = lead.get("feedback") or []
+        historial.append({"util": util, "texto": texto[:1000],
+                          "fecha": datetime.now(timezone.utc).isoformat()})
+        lead["feedback"] = historial
+        _lead_upsert(lead)
 
 
 async def _systeme_tag_id(client: httpx.AsyncClient) -> Optional[int]:
@@ -1417,6 +1469,7 @@ async def health():
         "status": "ok", "modelo": GEMINI_MODEL,
         "facebook": bool(APIFY_API_TOKEN), "youtube": bool(YOUTUBE_API_KEY),
         "usuarios_configurados": len(USERS), "modo_invitado": GUEST_MODE,
+        "almacen": "supabase" if USA_SUPABASE else "archivo local",
         "systeme": bool(SYSTEME_API_KEY),
     }
 
