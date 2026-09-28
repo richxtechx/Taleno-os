@@ -750,25 +750,70 @@ BASE_CSS = """
     --linea: #e6e8ec; --papel: #ffffff; --fondo: #f6f7f9;
     --dolor: #c2410c; --objecion: #9a6700; --deseo: #0f766e;
     --si: #0f766e; --tal: #9a6700; --no: #b42318;
+    --barra-h: 60px; --lateral-w: 250px; --lateral-min: 64px;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--fondo); color: var(--tinta);
-    font: 16px/1.55 "Instrument Sans", system-ui, -apple-system, sans-serif;
-    -webkit-text-size-adjust: 100%; }
+    font: 16px/1.55 "Instrument Sans", system-ui, -apple-system, sans-serif; -webkit-text-size-adjust: 100%; }
   h1, h2, .marca, .rec, .nombre { font-family: "Unbounded", "Instrument Sans", sans-serif; letter-spacing: -0.02em; }
   a { color: inherit; }
-  .barra { background: var(--papel); border-bottom: 1px solid var(--linea); position: sticky; top: 0; z-index: 10; }
-  .barra .in { max-width: 860px; margin: 0 auto; padding: 14px 20px; display: flex; align-items: center; gap: 12px; }
-  .marca { font-size: 17px; font-weight: 700; text-decoration: none; }
+
+  /* ---- barra superior ---- */
+  .topbar { position: fixed; top: 0; left: 0; right: 0; height: var(--barra-h); z-index: 30;
+    background: var(--papel); border-bottom: 1px solid var(--linea);
+    display: flex; align-items: center; gap: 12px; padding: 0 16px; }
+  .marca { font-size: 17px; font-weight: 700; text-decoration: none; white-space: nowrap; }
   .marca b { color: var(--naranja); }
-  .barra .sp { flex: 1; }
-  .barra a.salir, .volver { font-size: 14px; color: var(--gris); text-decoration: none; }
+  .topbar .sp { flex: 1; }
+  .hamb { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+    border: 1px solid var(--linea); border-radius: 10px; background: var(--papel); cursor: pointer; font-size: 18px; }
+  .usuario { display: flex; align-items: center; gap: 10px; }
+  .avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--tinta); color: #fff;
+    display: grid; place-items: center; font-size: 13px; font-weight: 700; }
+  .nombre-usuario { font-size: 14px; font-weight: 600; max-width: 150px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .btn-sesion { font: 600 14px "Instrument Sans", sans-serif; text-decoration: none; padding: 9px 16px;
+    border-radius: 10px; border: 1.5px solid var(--linea); color: var(--gris); background: var(--papel); }
+  .btn-sesion.primario { background: var(--naranja); border-color: var(--naranja); color: #fff; }
   .chip { font-size: 12px; font-weight: 700; color: var(--naranja); background: #fff1e9;
-    border-radius: 999px; padding: 5px 10px; margin-right: 10px; }
-  .barra a.salir:hover, .volver:hover { color: var(--naranja); }
-  main { max-width: 860px; margin: 0 auto; padding: 28px 20px 80px; }
-  h1 { font-size: clamp(26px, 6vw, 38px); line-height: 1.12; margin: 0 0 10px; }
-  .intro { color: var(--gris); margin: 0 0 24px; max-width: 62ch; }
+    border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
+
+  /* ---- barra lateral ---- */
+  .lateral { position: fixed; top: var(--barra-h); bottom: 0; left: 0; width: var(--lateral-w); z-index: 20;
+    background: var(--papel); border-right: 1px solid var(--linea); padding: 16px 12px;
+    display: flex; flex-direction: column; gap: 4px; overflow-y: auto; transition: width .18s, transform .18s; }
+  .grupo { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--gris); padding: 14px 12px 6px; }
+  .nav { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px;
+    text-decoration: none; color: var(--tinta); font-size: 15px; font-weight: 600; }
+  .nav:hover { background: var(--fondo); }
+  .nav[aria-current="page"] { background: #fff1e9; color: #b8430f; }
+  .nav .ic { width: 22px; text-align: center; font-size: 16px; flex: none; }
+  .nav .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav.mudo { color: var(--gris); font-weight: 400; cursor: default; }
+  .pie-lateral { margin-top: auto; padding: 12px; font-size: 12px; color: var(--gris); }
+
+  /* colapsada (escritorio) */
+  body.mini .lateral { width: var(--lateral-min); padding-left: 8px; padding-right: 8px; }
+  body.mini .lateral .tx, body.mini .grupo, body.mini .pie-lateral { display: none; }
+  body.mini .nav { justify-content: center; padding: 11px 0; }
+  body.mini .contenido { margin-left: var(--lateral-min); }
+
+  /* ---- contenido ---- */
+  .contenido { margin-top: var(--barra-h); margin-left: var(--lateral-w); padding: 28px 28px 80px;
+    max-width: 1100px; transition: margin-left .18s; }
+  .contenido.solo { margin-left: 0; }
+  .velo { display: none; position: fixed; inset: var(--barra-h) 0 0 0; background: rgba(11,11,15,.35); z-index: 15; }
+
+  @media (max-width: 860px) {
+    .lateral { transform: translateX(-100%); width: 78%; max-width: 280px; }
+    body.abierta .lateral { transform: none; }
+    body.abierta .velo { display: block; }
+    .contenido, body.mini .contenido { margin-left: 0; padding: 20px 16px 72px; }
+  }
+
+  h1 { font-size: clamp(24px, 5vw, 34px); line-height: 1.14; margin: 0 0 10px; }
+  .intro { color: var(--gris); margin: 0 0 22px; max-width: 62ch; }
   .label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--gris); margin: 20px 0 8px; }
   .tabs { display: flex; gap: 8px; flex-wrap: wrap; }
   .tab { padding: 10px 15px; font: 600 14px "Instrument Sans", sans-serif; color: var(--gris);
@@ -792,7 +837,7 @@ BASE_CSS = """
   .spinner { display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px;
     border: 2px solid var(--linea); border-top-color: var(--naranja); border-radius: 50%; animation: giro .8s linear infinite; }
   @keyframes giro { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .spinner, .lateral, .contenido { animation: none; transition: none; } }
   @media (min-width: 720px) { .submit { width: auto; } }
 """
 
@@ -843,8 +888,77 @@ FONTS = """<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=Unbounded:wght@600;700&family=Newsreader:ital,opsz@1,6..72&display=swap" rel="stylesheet">"""
 
+SHELL_JS = """
+(function () {
+  const cuerpo = document.body;
+  const btn = document.getElementById("hamb");
+  const velo = document.getElementById("velo");
+  const ancho = () => window.matchMedia("(max-width: 860px)").matches;
+  try { if (localStorage.getItem("lateral") === "mini" && !ancho()) cuerpo.classList.add("mini"); } catch (e) {}
+  if (btn) btn.addEventListener("click", () => {
+    if (ancho()) {
+      cuerpo.classList.toggle("abierta");
+    } else {
+      cuerpo.classList.toggle("mini");
+      try { localStorage.setItem("lateral", cuerpo.classList.contains("mini") ? "mini" : "ancha"); } catch (e) {}
+    }
+  });
+  if (velo) velo.addEventListener("click", () => cuerpo.classList.remove("abierta"));
+})();
+"""
 
-def page(title: str, body: str, extra_css: str = "", script: str = "") -> str:
+
+def _nombre_visible(user: str) -> str:
+    if is_guest(user):
+        email = guest_email(user)
+        return (_read_leads().get(email, {}).get("nombre") or email.split("@")[0]).strip()
+    return user.split("@")[0]
+
+
+def topbar(user: Optional[str], con_lateral: bool) -> str:
+    hamb = '<button class="hamb" id="hamb" aria-label="Mostrar u ocultar el menú">☰</button>' if con_lateral else ""
+    if user:
+        nombre = _nombre_visible(user)
+        inicial = (nombre[:1] or "?").upper()
+        etiqueta = ""
+        if is_guest(user):
+            restantes = max(GUEST_LIMIT - lead_usos(guest_email(user)), 0)
+            etiqueta = f'<span class="chip">{restantes} de {GUEST_LIMIT}</span>'
+        derecha = f"""<div class="usuario">{etiqueta}
+          <span class="avatar">{inicial}</span>
+          <span class="nombre-usuario">{nombre}</span>
+          <a class="btn-sesion" href="/logout">Salir</a></div>"""
+    else:
+        derecha = '<a class="btn-sesion primario" href="/login">Entrar</a>'
+    return f"""<header class="topbar">{hamb}
+      <a class="marca" href="/">TΛLENO <b>OS</b></a>
+      <span class="sp"></span>{derecha}</header>"""
+
+
+def sidebar(user: str, activo: str = "") -> str:
+    items = ['<a class="nav" href="/" %s><span class="ic">▦</span><span class="tx">Panel</span></a>'
+             % ('aria-current="page"' if activo == "panel" else "")]
+    items.append('<div class="grupo">Agentes</div>')
+    iconos = {"radar": "◎", "analista": "⚑"}
+    for slug, c in CEREBROS.items():
+        actual = 'aria-current="page"' if activo == slug else ""
+        items.append(f'<a class="nav" href="/cerebro/{slug}" {actual}>'
+                     f'<span class="ic">{iconos.get(slug, "✦")}</span>'
+                     f'<span class="tx">{c["nombre"]}</span></a>')
+    items.append('<div class="nav mudo"><span class="ic">+</span><span class="tx">Próximamente</span></div>')
+    if not is_guest(user):
+        items.append('<div class="grupo">Gestión</div>')
+        actual = 'aria-current="page"' if activo == "leads" else ""
+        items.append(f'<a class="nav" href="/leads" {actual}><span class="ic">✉</span>'
+                     f'<span class="tx">Invitados</span></a>')
+    items.append('<div class="pie-lateral">RichTech · Método TΛLENO</div>')
+    return '<aside class="lateral">' + "".join(items) + '</aside><div class="velo" id="velo"></div>'
+
+
+def page(title: str, contenido: str, user: Optional[str] = None, activo: str = "",
+         extra_css: str = "", script: str = "", con_lateral: bool = True) -> str:
+    lateral = sidebar(user, activo) if (con_lateral and user) else ""
+    clase = "contenido" if lateral else "contenido solo"
     return f"""<!DOCTYPE html>
 <html lang="es"><head>
 <meta charset="utf-8">
@@ -853,134 +967,11 @@ def page(title: str, body: str, extra_css: str = "", script: str = "") -> str:
 {FONTS}
 <style>{BASE_CSS}{extra_css}</style>
 </head><body>
-{body}
-<script>{script}</script>
+{topbar(user, bool(lateral))}
+{lateral}
+<main class="{clase}">{contenido}</main>
+<script>{SHELL_JS}{script}</script>
 </body></html>"""
-
-
-def barra(user: Optional[str] = None, volver: bool = False) -> str:
-    izq = '<a class="volver" href="/">← Cerebros</a>' if volver else ""
-    if user and is_guest(user):
-        der = f'<span class="chip">Prueba · {max(GUEST_LIMIT - lead_usos(guest_email(user)), 0)} de {GUEST_LIMIT}</span><a class="salir" href="/logout">Salir</a>'
-    elif user:
-        der = '<a class="salir" href="/logout">Salir</a>'
-    else:
-        der = ""
-    return f"""<div class="barra"><div class="in">
-      <a class="marca" href="/">TΛLENO <b>OS</b></a>{izq}<span class="sp"></span>{der}
-    </div></div>"""
-
-
-LOGIN_CSS = """
-  .caja { max-width: 400px; margin: 8vh auto; background: var(--papel); border: 1px solid var(--linea);
-    border-radius: 18px; padding: 32px 26px; }
-  .caja h1 { font-size: 26px; margin-bottom: 6px; }
-  .caja p { color: var(--gris); margin: 0 0 22px; }
-  .campo { margin-bottom: 12px; }
-  .invitado { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--linea); text-align: center; }
-  .invitado span { display: block; color: var(--gris); font-size: 13px; margin-bottom: 10px; }
-  .invitado form { text-align: left; }
-  .invitado .submit { background: var(--tinta); }
-  .invitado small { display: block; color: var(--gris); margin-top: 6px; }
-"""
-
-LOGIN_JS = """
-const guest = document.getElementById("guest");
-if (guest) guest.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const s = document.getElementById("gstatus");
-  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Preparando tu prueba…';
-  try {
-    const res = await fetch("/api/invitado", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nombre: document.getElementById("gnombre").value.trim(), email: document.getElementById("gemail").value.trim() }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo entrar.");
-    window.location.href = "/";
-  } catch (err) { s.className = "status error"; s.textContent = err.message; }
-});
-
-const form = document.getElementById("login");
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const s = document.getElementById("status");
-  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Entrando…';
-  try {
-    const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: document.getElementById("email").value.trim(), password: document.getElementById("password").value }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo entrar.");
-    window.location.href = "/";
-  } catch (err) { s.className = "status error"; s.textContent = err.message; }
-});
-"""
-
-
-def login_page(msg: str = "") -> str:
-    aviso = f'<p class="status error">{msg}</p>' if msg else ""
-    body = barra() + f"""<main><div class="caja">
-      <h1>Entrar</h1>
-      <p>Tus cerebros de investigación de mercado, en un solo lugar.</p>
-      {aviso}
-      <form id="login">
-        <div class="campo"><input id="email" type="email" required placeholder="Correo" aria-label="Correo"></div>
-        <div class="campo"><input id="password" type="password" required placeholder="Contraseña" aria-label="Contraseña"></div>
-        <button class="submit" type="submit">Entrar</button>
-      </form>
-      <p id="status" class="status"></p>
-      __INVITADO__
-    </div></main>"""
-    invitado = (f"""<div class="invitado"><span>¿Primera vez? Prueba gratis</span>
-        <form id="guest">
-          <div class="campo"><input id="gnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
-          <div class="campo"><input id="gemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
-          <button class="submit" type="submit">Probar gratis ({GUEST_LIMIT} análisis)</button>
-        </form>
-        <p id="gstatus" class="status"></p>
-        <small>Te aviso por correo cuando agregue cerebros nuevos. Nada de spam.</small></div>""" if GUEST_MODE else "")
-    return page("Entrar · TΛLENO OS", body.replace("__INVITADO__", invitado), LOGIN_CSS, LOGIN_JS)
-
-
-DASH_CSS = """
-  .cerebros { display: grid; gap: 14px; grid-template-columns: 1fr; }
-  @media (min-width: 720px) { .cerebros { grid-template-columns: 1fr 1fr; } }
-  .cerebro { background: var(--papel); border: 1px solid var(--linea); border-radius: 18px; padding: 22px;
-    text-decoration: none; display: flex; flex-direction: column; gap: 8px; transition: border-color .15s, transform .15s; }
-  .cerebro:hover { border-color: var(--naranja); transform: translateY(-2px); }
-  .cerebro .num { font-size: 12px; font-weight: 700; letter-spacing: .08em; color: var(--naranja); }
-  .cerebro .nombre { font-size: 21px; font-weight: 700; }
-  .cerebro .lema { color: var(--azul); font-weight: 600; font-size: 14px; }
-  .cerebro .desc { color: var(--gris); font-size: 15px; }
-  .cerebro .pie { margin-top: auto; padding-top: 12px; font-size: 13px; color: var(--gris); }
-  .proximo { border-style: dashed; color: var(--gris); }
-  .proximo .nombre { color: var(--gris); }
-"""
-
-
-def dash_page(user: str) -> str:
-    tarjetas = ""
-    for i, (slug, c) in enumerate(CEREBROS.items(), start=1):
-        tarjetas += f"""<a class="cerebro" href="/cerebro/{slug}">
-          <span class="num">CEREBRO {i:02d}</span>
-          <span class="nombre">{c['nombre']}</span>
-          <span class="lema">{c['lema']}</span>
-          <span class="desc">{c['desc']}</span>
-          <span class="pie">⏱ {c['tiempo']}</span></a>"""
-    if not is_guest(user):
-        tarjetas += """<a class="cerebro proximo" href="/leads">
-          <span class="num">PANEL</span>
-          <span class="nombre">Invitados</span>
-          <span class="desc">Correos capturados y feedback recibido.</span></a>"""
-    tarjetas += """<div class="cerebro proximo">
-          <span class="num">PRÓXIMAMENTE</span>
-          <span class="nombre">Nuevo cerebro</span>
-          <span class="desc">Aquí van los siguientes: copy, oferta, contenido…</span></div>"""
-    body = barra(user) + f"""<main>
-      <h1>Tus cerebros</h1>
-      <p class="intro">Cada cerebro hace una sola cosa, y la hace bien. Elige con cuál vas a trabajar hoy.</p>
-      <div class="cerebros">{tarjetas}</div>
-    </main>"""
-    return page("Cerebros · TΛLENO OS", body, DASH_CSS)
-
 
 BRAIN_JS = """
 const MODO = "__MODO__";
@@ -1144,6 +1135,114 @@ el("form").addEventListener("submit", async (e) => {
 """
 
 
+
+LOGIN_CSS = """
+  .caja { max-width: 420px; margin: 6vh auto; background: var(--papel); border: 1px solid var(--linea);
+    border-radius: 18px; padding: 32px 26px; }
+  .caja h1 { font-size: 26px; margin-bottom: 6px; }
+  .caja > p { color: var(--gris); margin: 0 0 22px; }
+  .campo { margin-bottom: 12px; }
+  .invitado { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--linea); }
+  .invitado > span { display: block; font-weight: 700; margin-bottom: 12px; }
+  .invitado .submit { background: var(--tinta); }
+  .invitado small { display: block; color: var(--gris); margin-top: 10px; }
+"""
+
+
+LOGIN_JS = """
+const guest = document.getElementById("guest");
+if (guest) guest.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const s = document.getElementById("gstatus");
+  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Preparando tu prueba…';
+  try {
+    const res = await fetch("/api/invitado", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nombre: document.getElementById("gnombre").value.trim(), email: document.getElementById("gemail").value.trim() }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo entrar.");
+    window.location.href = "/";
+  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+});
+
+const form = document.getElementById("login");
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const s = document.getElementById("status");
+  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Entrando…';
+  try {
+    const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: document.getElementById("email").value.trim(), password: document.getElementById("password").value }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo entrar.");
+    window.location.href = "/";
+  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+});
+"""
+
+
+def login_page(msg: str = "") -> str:
+    aviso = f'<p class="status error">{msg}</p>' if msg else ""
+    invitado = (f"""<div class="invitado"><span>¿Primera vez? Prueba gratis</span>
+        <form id="guest">
+          <div class="campo"><input id="gnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
+          <div class="campo"><input id="gemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
+          <button class="submit" type="submit">Probar gratis ({GUEST_LIMIT} análisis)</button>
+        </form>
+        <p id="gstatus" class="status"></p>
+        <small>Te aviso por correo cuando agregue agentes nuevos. Nada de spam.</small></div>""" if GUEST_MODE else "")
+    contenido = f"""<div class="caja">
+      <h1>Entrar</h1>
+      <p>Tus agentes de investigación de mercado, en un solo lugar.</p>
+      {aviso}
+      <form id="login">
+        <div class="campo"><input id="email" type="email" required placeholder="Correo" aria-label="Correo"></div>
+        <div class="campo"><input id="password" type="password" required placeholder="Contraseña" aria-label="Contraseña"></div>
+        <button class="submit" type="submit">Entrar</button>
+      </form>
+      <p id="status" class="status"></p>
+      {invitado}
+    </div>"""
+    return page("Entrar · TΛLENO OS", contenido, None, "", LOGIN_CSS, LOGIN_JS, con_lateral=False)
+
+
+DASH_CSS = """
+  .cerebros { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  @media (min-width: 900px) { .cerebros { grid-template-columns: 1fr 1fr; } }
+  .cerebro { background: var(--papel); border: 1px solid var(--linea); border-radius: 18px; padding: 22px;
+    text-decoration: none; display: flex; flex-direction: column; gap: 8px; transition: border-color .15s, transform .15s; }
+  .cerebro:hover { border-color: var(--naranja); transform: translateY(-2px); }
+  .cerebro .num { font-size: 12px; font-weight: 700; letter-spacing: .08em; color: var(--naranja); }
+  .cerebro .nombre { font-size: 21px; font-weight: 700; }
+  .cerebro .lema { color: var(--azul); font-weight: 600; font-size: 14px; }
+  .cerebro .desc { color: var(--gris); font-size: 15px; }
+  .cerebro .pie { margin-top: auto; padding-top: 12px; font-size: 13px; color: var(--gris); }
+  .proximo { border-style: dashed; }
+  .proximo .nombre { color: var(--gris); }
+"""
+
+
+def dash_page(user: str) -> str:
+    tarjetas = ""
+    for i, (slug, c) in enumerate(CEREBROS.items(), start=1):
+        tarjetas += f"""<a class="cerebro" href="/cerebro/{slug}">
+          <span class="num">AGENTE {i:02d}</span>
+          <span class="nombre">{c['nombre']}</span>
+          <span class="lema">{c['lema']}</span>
+          <span class="desc">{c['desc']}</span>
+          <span class="pie">⏱ {c['tiempo']}</span></a>"""
+    if not is_guest(user):
+        tarjetas += """<a class="cerebro proximo" href="/leads">
+          <span class="num">PANEL</span><span class="nombre">Invitados</span>
+          <span class="desc">Correos capturados y feedback recibido.</span></a>"""
+    tarjetas += """<div class="cerebro proximo">
+          <span class="num">PRÓXIMAMENTE</span><span class="nombre">Nuevo agente</span>
+          <span class="desc">Aquí van los siguientes: copy, oferta, contenido…</span></div>"""
+    contenido = f"""<h1>Hola, {_nombre_visible(user)}</h1>
+      <p class="intro">Cada agente hace una sola cosa, y la hace bien. Elige con cuál vas a trabajar hoy.</p>
+      <div class="cerebros">{tarjetas}</div>"""
+    return page("Panel · TΛLENO OS", contenido, user, "panel", DASH_CSS)
+
+
 LEADS_CSS = """
   table { width: 100%; border-collapse: collapse; background: var(--papel); border-radius: 14px; overflow: hidden; }
   th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--linea); font-size: 14px; vertical-align: top; }
@@ -1163,25 +1262,23 @@ def leads_page(user: str) -> str:
             for f in l.get("feedback", [])
         ) or "<span class='fb'>Sin feedback</span>"
         sync = "✓ en systeme.io" if l.get("systeme") else ("· solo local" if SYSTEME_API_KEY else "")
-        filas += f"""<tr><td>{l.get('nombre','')}<br><span class="fb">{l.get('email','')}</span><br><span class="fb">{sync}</span></td>
+        filas += f"""<tr><td>{l.get('nombre','')}<br><span class="fb">{l.get('email','')}</span><br>
+          <span class="fb">{sync}</span></td>
           <td>{l.get('usos',0)} / {GUEST_LIMIT}</td><td>{l.get('creado','')[:10]}</td><td>{fb}</td></tr>"""
     if not filas:
         filas = '<tr><td colspan="4">Todavía no hay invitados.</td></tr>'
-    body = barra(user, volver=True) + f"""<main>
-      <h1>Invitados</h1>
+    contenido = f"""<h1>Invitados</h1>
       <p class="intro">{len(leads)} correos capturados. El feedback que dejan aparece en la última columna.</p>
       <a class="descarga" href="/leads.csv">↓ Descargar CSV</a>
-      <div class="wrap"><table><tr><th>Persona</th><th>Usos</th><th>Desde</th><th>Feedback</th></tr>{filas}</table></div>
-    </main>"""
-    return page("Invitados · TΛLENO OS", body, LEADS_CSS)
+      <div class="wrap"><table><tr><th>Persona</th><th>Usos</th><th>Desde</th><th>Feedback</th></tr>{filas}</table></div>"""
+    return page("Invitados · TΛLENO OS", contenido, user, "leads", LEADS_CSS)
 
 
 def brain_page(slug: str, user: str) -> str:
     c = CEREBROS[slug]
     tab_fb = ("" if (is_guest(user) and not GUEST_FULL)
               else '<button class="tab" data-src="facebook" aria-pressed="false">Facebook</button>')
-    body = barra(user, volver=True) + f"""<main>
-      <h1>{c['nombre']}</h1>
+    contenido = f"""<h1>{c['nombre']}</h1>
       <p class="intro">{c['desc']}</p>
 
       <div class="label">Fuente de los comentarios</div>
@@ -1220,9 +1317,9 @@ def brain_page(slug: str, user: str) -> str:
         <textarea id="fbTexto" placeholder="¿Qué le falta? ¿Qué cambiarías? (opcional)"></textarea>
         <button type="button" id="fbEnviar" class="submit">Enviar comentario</button>
         <p id="fbStatus" class="status"></p>
-      </div>
-    </main>"""
-    return page(f"{c['nombre']} · TΛLENO OS", body, RESULT_CSS, BRAIN_JS.replace("__MODO__", c["modo"]))
+      </div>"""
+    return page(f"{c['nombre']} · TΛLENO OS", contenido, user, slug, RESULT_CSS,
+                BRAIN_JS.replace("__MODO__", c["modo"]))
 
 
 # ---------------------------------------------------------------------------
