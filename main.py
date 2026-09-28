@@ -49,6 +49,9 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
+TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
+ANIO = datetime.now(timezone.utc).year
 SECRET_KEY = os.getenv("SECRET_KEY") or secrets.token_urlsafe(32)
 SESSION_DAYS = 30
 COOKIE_NAME = "taleno_session"
@@ -126,24 +129,24 @@ def _sb_headers() -> dict:
 _sb_ultimo_error = {"detalle": ""}
 
 
-def _sb_url() -> str:
-    """Arma la URL de la tabla aunque la variable traiga /rest/v1 o barras de más."""
+def _sb_base() -> str:
+    """Base del proyecto, aunque la variable traiga /rest/v1 o barras de más."""
     base = (SUPABASE_URL or "").strip().strip('"').strip("'").rstrip("/")
     for sufijo in ("/rest/v1/leads", "/rest/v1", "/rest"):
         if base.endswith(sufijo):
             base = base[: -len(sufijo)]
             break
-    return f"{base.rstrip('/')}/rest/v1/leads"
+    return base.rstrip("/")
 
 
-def _sb(metodo: str, params: dict = None, payload=None) -> list:
-    url = _sb_url()
+def _sb_tabla(tabla: str, metodo: str, params: dict = None, payload=None) -> list:
+    url = f"{_sb_base()}/rest/v1/{tabla}"
     try:
         with httpx.Client(timeout=15, headers=_sb_headers()) as client:
             resp = client.request(metodo, url, params=params, json=payload)
         if resp.status_code >= 400:
-            _sb_ultimo_error["detalle"] = f"{metodo} {resp.status_code}: {resp.text[:300]}"
-            logger.warning("Supabase %s -> %s: %s", metodo, resp.status_code, resp.text[:300])
+            _sb_ultimo_error["detalle"] = f"{tabla} {metodo} {resp.status_code}: {resp.text[:300]}"
+            logger.warning("Supabase %s %s -> %s: %s", tabla, metodo, resp.status_code, resp.text[:300])
             return []
         _sb_ultimo_error["detalle"] = ""
         return resp.json() if resp.text else []
@@ -151,6 +154,15 @@ def _sb(metodo: str, params: dict = None, payload=None) -> list:
         _sb_ultimo_error["detalle"] = f"Error de conexión: {exc}"
         logger.exception("Supabase: error de conexión")
         return []
+
+
+def _sb_url() -> str:
+    """Arma la URL de la tabla de leads."""
+    return f"{_sb_base()}/rest/v1/leads"
+
+
+def _sb(metodo: str, params: dict = None, payload=None) -> list:
+    return _sb_tabla("leads", metodo, params, payload)
 
 
 # --- Archivo local (respaldo cuando no hay Supabase) ----------------------
@@ -232,6 +244,41 @@ async def lead_marcar_systeme(email: str, ok: bool):
             return
         lead["systeme"] = ok
         _lead_upsert(lead)
+
+
+# --- Historial de análisis (solo con Supabase) ----------------------------
+def historial_guardar(usuario: str, agente: str, titulo: str, fuente: str,
+                      total: int, datos: dict) -> Optional[str]:
+    if not USA_SUPABASE:
+        return None
+    fila = {"usuario": usuario, "agente": agente, "titulo": titulo[:200],
+            "fuente": fuente[:100], "total_comentarios": total, "datos": datos}
+    creado = _sb_tabla("analisis", "POST", payload=fila)
+    return (creado[0].get("id") if creado else None)
+
+
+def historial_listar(usuario: str, limite: int = 50) -> list:
+    if not USA_SUPABASE:
+        return []
+    return _sb_tabla("analisis", "GET", params={
+        "usuario": f"eq.{usuario}",
+        "select": "id,agente,titulo,fuente,total_comentarios,creado",
+        "order": "creado.desc", "limit": limite,
+    })
+
+
+def historial_abrir(usuario: str, id_analisis: str) -> Optional[dict]:
+    if not USA_SUPABASE:
+        return None
+    filas = _sb_tabla("analisis", "GET", params={
+        "id": f"eq.{id_analisis}", "usuario": f"eq.{usuario}", "select": "*", "limit": 1,
+    })
+    return filas[0] if filas else None
+
+
+def historial_borrar(usuario: str, id_analisis: str):
+    if USA_SUPABASE:
+        _sb_tabla("analisis", "DELETE", params={"id": f"eq.{id_analisis}", "usuario": f"eq.{usuario}"})
 
 
 async def lead_feedback(email: str, util: Optional[bool], texto: str):
@@ -825,8 +872,9 @@ BASE_CSS = """
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--fondo); color: var(--tinta);
-    font: 16px/1.55 "Instrument Sans", system-ui, -apple-system, sans-serif; -webkit-text-size-adjust: 100%; }
-  h1, h2, .marca, .rec, .nombre { font-family: "Unbounded", "Instrument Sans", sans-serif; letter-spacing: -0.02em; }
+    font: 16px/1.5 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; }
+  h1, h2, h3, .marca, .rec, .nombre { font-weight: 700; letter-spacing: -0.015em; }
   a { color: inherit; }
 
   /* ---- barra superior ---- */
@@ -843,7 +891,7 @@ BASE_CSS = """
     display: grid; place-items: center; font-size: 13px; font-weight: 700; }
   .nombre-usuario { font-size: 14px; font-weight: 600; max-width: 150px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
-  .btn-sesion { font: 600 14px "Instrument Sans", sans-serif; text-decoration: none; padding: 9px 16px;
+  .btn-sesion { font: 600 14px inherit; text-decoration: none; padding: 9px 16px;
     border-radius: 10px; border: 1.5px solid var(--linea); color: var(--gris); background: var(--papel); }
   .btn-sesion.primario { background: var(--naranja); border-color: var(--naranja); color: #fff; }
   .chip { font-size: 12px; font-weight: 700; color: var(--naranja); background: #fff1e9;
@@ -862,7 +910,11 @@ BASE_CSS = """
   .nav .ic { width: 22px; text-align: center; font-size: 16px; flex: none; }
   .nav .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nav.mudo { color: var(--gris); font-weight: 400; cursor: default; }
-  .pie-lateral { margin-top: auto; padding: 12px; font-size: 12px; color: var(--gris); }
+  .pie-lateral { margin-top: auto; padding: 14px 12px; font-size: 12px; color: var(--gris);
+    display: flex; flex-direction: column; gap: 4px; }
+  .pie-lateral a { color: var(--gris); text-decoration: none; word-break: break-all; }
+  .pie-lateral a:hover { color: var(--naranja); }
+  .pie-lateral .tele { color: var(--azul); font-weight: 600; margin-bottom: 6px; }
 
   /* colapsada (escritorio) */
   body.mini .lateral { width: var(--lateral-min); padding-left: 8px; padding-right: 8px; }
@@ -887,7 +939,7 @@ BASE_CSS = """
   .intro { color: var(--gris); margin: 0 0 22px; max-width: 62ch; }
   .label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--gris); margin: 20px 0 8px; }
   .tabs { display: flex; gap: 8px; flex-wrap: wrap; }
-  .tab { padding: 10px 15px; font: 600 14px "Instrument Sans", sans-serif; color: var(--gris);
+  .tab { padding: 10px 15px; font: 600 14px inherit; color: var(--gris);
     background: var(--papel); border: 1.5px solid var(--linea); border-radius: 999px; cursor: pointer; }
   .tab[aria-pressed="true"] { color: #fff; background: var(--tinta); border-color: var(--tinta); }
   .hint { color: var(--gris); font-size: 14px; margin: 14px 0 10px; }
@@ -898,18 +950,44 @@ BASE_CSS = """
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .row > * { flex: 1 1 220px; }
   .counter { font-size: 13px; color: var(--gris); margin-top: 6px; }
-  .submit { width: 100%; margin-top: 16px; padding: 16px 22px; font: 700 16px "Instrument Sans", sans-serif;
+  .submit { width: 100%; margin-top: 16px; padding: 16px 22px; font: 700 16px inherit;
     color: #fff; background: var(--naranja); border: 0; border-radius: 12px; cursor: pointer; }
   .submit:disabled { opacity: .6; cursor: wait; }
   button:focus-visible, a:focus-visible { outline: 3px solid rgba(255,107,43,.4); outline-offset: 2px; }
   [hidden] { display: none !important; }
   .status { margin: 16px 0 0; color: var(--gris); min-height: 1.5em; }
   .status.error { color: var(--no); font-weight: 600; }
+  .status.aviso { background: #fff1e9; border: 1px solid #ffd3bd; color: #8a3b12;
+    padding: 14px 16px; border-radius: 12px; }
+  .tab.bloqueada { opacity: .75; border-style: dashed; }
   .spinner { display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px;
     border: 2px solid var(--linea); border-top-color: var(--naranja); border-radius: 50%; animation: giro .8s linear infinite; }
   @keyframes giro { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spinner, .lateral, .contenido { animation: none; transition: none; } }
   @media (min-width: 720px) { .submit { width: auto; } }
+
+  /* ---- impresión / guardar como PDF ---- */
+  .pie-impresion { display: none; }
+  @media print {
+    @page { margin: 14mm; }
+    body { background: #fff; }
+    .topbar, .lateral, .velo, .no-print, form, #fbBox, .barra-detalle,
+    .hint, .label, .tabs, .status, .crudos, .extraidos .acciones, .recuperado { display: none !important; }
+    .contenido, body.mini .contenido { margin: 0 !important; padding: 0 !important; max-width: none; }
+    .pie-impresion { display: block; margin-top: 24px; padding-top: 10px;
+      border-top: 1px solid #ddd; font-size: 11px; color: #666; }
+    .item, .summary, .crudos, .sources a { break-inside: avoid; page-break-inside: avoid;
+      border-color: #ddd !important; box-shadow: none; }
+    section { break-inside: auto; margin-top: 18px; }
+    h1 { font-size: 24px; }
+    h2 { font-size: 17px; }
+    .verdict { color: #000 !important; background: #fff !important;
+      border: 2px solid #333; break-inside: avoid; }
+    .verdict .score { background: #eee !important; color: #000 !important; }
+    blockquote { color: #333; }
+    a { text-decoration: none; color: #000; }
+    .sources a::after { content: " (" attr(href) ")"; font-size: 10px; color: #666; }
+  }
 """
 
 RESULT_CSS = """
@@ -927,8 +1005,8 @@ RESULT_CSS = """
   .item h3 { margin: 0; font-size: 17px; }
   .item p { margin: 8px 0 0; }
   .freq { font-size: 13px; font-weight: 600; color: var(--c, var(--azul)); white-space: nowrap; }
-  blockquote { margin: 12px 0 0; padding: 0 0 0 14px; border-left: 2px solid var(--c, var(--azul));
-    font: italic 17px/1.5 "Newsreader", Georgia, serif; color: #33445c; }
+  blockquote { margin: 10px 0 0; padding: 12px 14px; border-left: 3px solid var(--c, var(--azul));
+    background: #f7f8fa; border-radius: 0 10px 10px 0; font-size: 15px; color: #3c4451; }
   blockquote + blockquote { margin-top: 8px; }
   .empty { color: var(--gris); font-style: italic; margin: 0; }
   .verdict { margin-top: 26px; padding: 24px; border-radius: 16px; color: #fff; background: var(--v); }
@@ -938,7 +1016,7 @@ RESULT_CSS = """
   .verdict p { margin: 12px 0 0; }
   .verdict .next { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.3); }
   .problem .macro { text-decoration: line-through; color: var(--gris); }
-  .problem .specific { font: italic 20px/1.4 "Newsreader", Georgia, serif; margin: 10px 0 0; }
+  .problem .specific { font-size: 19px; font-weight: 600; line-height: 1.35; margin: 10px 0 0; }
   .product { border: 2px solid var(--tinta); }
   .product .nombre { font-size: 22px; font-weight: 700; margin: 0; line-height: 1.2; }
   .product .price { font-size: 30px; font-weight: 700; margin: 14px 0 0; color: var(--naranja); }
@@ -953,9 +1031,14 @@ RESULT_CSS = """
   .extraidos .acciones { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .extraidos .tab { cursor: pointer; }
   .extraidos .tab.destacado { background: var(--naranja); border-color: var(--naranja); color: #fff; }
+  .acciones-informe { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .acciones-informe .tab { cursor: pointer; }
+  .recuperado { color: var(--gris); font-size: 14px; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; margin-top: 18px; }
+  .recuperado .tab { cursor: pointer; }
   .crudos { background: var(--papel); border: 1px solid var(--linea); border-radius: 14px; padding: 16px;
     max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
-    font: 14px/1.5 "Instrument Sans", sans-serif; color: #33445c; margin: 0; }
+    font: 14px/1.6 inherit; color: #33445c; margin: 0; }
   .sources a { display: block; background: var(--papel); border: 1px solid var(--linea); border-radius: 14px;
     padding: 14px 18px; margin-bottom: 10px; text-decoration: none; }
   .sources small { color: var(--gris); display: block; }
@@ -963,7 +1046,9 @@ RESULT_CSS = """
 
 FONTS = """<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=Unbounded:wght@600;700&family=Newsreader:ital,opsz@1,6..72&display=swap" rel="stylesheet">"""
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">"""
+
+PIE_TEXTO = f"© {ANIO} Richard Taleno · Todos los derechos reservados · {CONTACT_EMAIL}"
 
 SHELL_JS = """
 (function () {
@@ -1025,12 +1110,21 @@ def sidebar(user: str, activo: str = "") -> str:
                      f'<span class="ic">{iconos.get(slug, "✦")}</span>'
                      f'<span class="tx">{c["nombre"]}</span></a>')
     items.append('<div class="nav mudo"><span class="ic">+</span><span class="tx">Próximamente</span></div>')
+    items.append('<div class="grupo">Tu trabajo</div>')
+    actual = 'aria-current="page"' if activo == "historial" else ""
+    items.append(f'<a class="nav" href="/historial" {actual}><span class="ic">◷</span>'
+                 f'<span class="tx">Historial</span></a>')
     if not is_guest(user):
         items.append('<div class="grupo">Gestión</div>')
         actual = 'aria-current="page"' if activo == "leads" else ""
         items.append(f'<a class="nav" href="/leads" {actual}><span class="ic">✉</span>'
-                     f'<span class="tx">Invitados</span></a>')
-    items.append('<div class="pie-lateral">RichTech · Método TΛLENO</div>')
+                     f'<span class="tx">Usuarios</span></a>')
+    tele = (f'<a class="tele" href="{TELEGRAM_URL}" target="_blank" rel="noopener">✈ Canal de Telegram</a>'
+            if TELEGRAM_URL else "")
+    items.append(f'<div class="pie-lateral">{tele}'
+                 f'<span>© {ANIO} Richard Taleno</span>'
+                 f'<span>Todos los derechos reservados</span>'
+                 f'<a href="mailto:{CONTACT_EMAIL}">{CONTACT_EMAIL}</a></div>')
     return '<aside class="lateral">' + "".join(items) + '</aside><div class="velo" id="velo"></div>'
 
 
@@ -1053,93 +1147,73 @@ def page(title: str, contenido: str, user: Optional[str] = None, activo: str = "
 <script>{SHELL_JS}{script}</script>
 </body></html>"""
 
-BRAIN_JS = """
-const MODO = "__MODO__";
-const SOURCES = {
-  "paste": { endpoint: "/paste", hint: "Pega los comentarios, uno por línea. Lo ideal son 200-300.",
-    wait: "Analizando los comentarios.", body: () => ({ texto: el("texto").value }) },
-  "yt-search": { endpoint: "/youtube/search", type: "text", placeholder: "Ej: cómo emprender con poco dinero",
-    hint: "Escribe un tema. Buscamos videos en español con más comentarios y los analizamos juntos.",
-    wait: "Buscando videos y leyendo sus comentarios.", body: () => ({ query: el("field").value.trim(), max_videos: Number(el("nvideos").value) }) },
-  "yt-video": { endpoint: "/youtube/video", type: "url", placeholder: "https://www.youtube.com/watch?v=...",
-    hint: "Pega el enlace de un video de YouTube (también sirven Shorts).",
-    wait: "Leyendo los comentarios del video.", body: () => ({ url: el("field").value.trim() }) },
-  "facebook": { endpoint: "/analyze", type: "url", placeholder: "https://www.facebook.com/...",
-    hint: "Pega el enlace de una publicación pública de Facebook. Puede tardar de 1 a 3 minutos.",
-    wait: "Leyendo comentarios de Facebook.", body: () => ({ url: el("field").value.trim() }) },
-};
+RENDER_JS = """
 const el = (id) => document.getElementById(id);
-let src = "__INICIAL__";
-
-function setSource(s) {
-  src = s; const cfg = SOURCES[s];
-  document.querySelectorAll("#sources .tab").forEach(t => t.setAttribute("aria-pressed", String(t.dataset.src === s)));
-  el("pasteBox").hidden = s !== "paste";
-  el("lineBox").hidden = s === "paste";
-  el("texto").required = s === "paste";
-  el("field").required = s !== "paste";
-  if (cfg.type) { el("field").type = cfg.type; el("field").placeholder = cfg.placeholder; el("field").value = ""; }
-  el("nvideos").hidden = s !== "yt-search";
-  el("hint").textContent = cfg.hint;
-}
-document.querySelectorAll("#sources .tab").forEach(t => t.addEventListener("click", () => setSource(t.dataset.src)));
-el("texto").addEventListener("input", () => {
-  const n = el("texto").value.split("\\n").filter(l => l.trim().length >= 3).length;
-  el("counter").textContent = `${n} comentarios detectados` + (n && n < 50 ? " · con menos de 50 el análisis será poco confiable" : "");
-});
-setSource(src);
-
-// Si venimos del Radar, precargamos los comentarios que trajo
-try {
-  const traidos = sessionStorage.getItem("comentarios_radar");
-  if (traidos && el("texto")) {
-    sessionStorage.removeItem("comentarios_radar");
-    el("texto").value = traidos;
-    el("texto").dispatchEvent(new Event("input"));
-    el("status").textContent = "Comentarios traídos del Radar. Dale a Analizar.";
-    el("texto").scrollIntoView({ behavior: "smooth", block: "center" });
-  }
-} catch (e) {}
-
-let comentariosExtraidos = [];
-
-function bloqueComentarios(data) {
-  if (!data.comentarios || !data.comentarios.length) return "";
-  comentariosExtraidos = data.comentarios;
-  return `<section class="extraidos">
-    <h2>Comentarios extraídos <span class="count">(${data.comentarios.length})</span></h2>
-    <div class="acciones">
-      <button type="button" class="tab" id="copiar">⧉ Copiar todos</button>
-      <button type="button" class="tab destacado" id="alAnalista">→ Analizar con el Analista</button>
-    </div>
-    <p id="copiaStatus" class="counter"></p>
-    <pre class="crudos">${esc(data.comentarios.join("\\n"))}</pre>
-  </section>`;
-}
-
-function conectarBotones() {
-  const copiar = el("copiar"), alAnalista = el("alAnalista");
-  if (copiar) copiar.addEventListener("click", async () => {
-    const texto = comentariosExtraidos.join("\\n");
-    try {
-      await navigator.clipboard.writeText(texto);
-      el("copiaStatus").textContent = `${comentariosExtraidos.length} comentarios copiados al portapapeles.`;
-    } catch (err) {
-      const ta = document.createElement("textarea");
-      ta.value = texto; document.body.appendChild(ta); ta.select();
-      document.execCommand("copy"); ta.remove();
-      el("copiaStatus").textContent = "Comentarios copiados.";
-    }
-  });
-  if (alAnalista) alAnalista.addEventListener("click", () => {
-    try { sessionStorage.setItem("comentarios_radar", comentariosExtraidos.join("\\n")); } catch (e) {}
-    window.location.href = "/cerebro/analista";
-  });
-}
 
 function esc(t) { const d = document.createElement("div"); d.textContent = t ?? ""; return d.innerHTML; }
 const quotes = (arr, c) => (arr || []).map(q => `<blockquote style="--c:${c}">“${esc(q)}”</blockquote>`).join("");
 const lista = (arr) => (arr && arr.length) ? `<ul>${arr.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="empty">Sin evidencia en los comentarios.</p>`;
+
+function acciones() {
+  return `<div class="acciones-informe no-print">
+    <button type="button" class="tab" id="pdf">⤓ Guardar PDF</button>
+    <button type="button" class="tab" id="copiarInforme">⧉ Copiar informe</button>
+    <span id="accionStatus" class="counter"></span>
+  </div>`;
+}
+
+function informeTexto(data) {
+  const L = [];
+  const linea = (t) => L.push(t);
+  const NL = "\\n";
+  if (data.mercado) {
+    const m = data.mercado, v = m.veredicto, p = m.propuesta_producto, pu = m.problema_urgente;
+    linea(`ANALISTA DE MERCADO — ${data.consulta || ""}`);
+    linea(`${data.total_comentarios} comentarios · ${data.fuente}` + NL);
+    linea("RESUMEN" + NL + m.resumen_ejecutivo + NL);
+    linea(`VEREDICTO: ${v.recomendacion} (${v.puntuacion}/10)` + NL + v.justificacion);
+    if (v.riesgos && v.riesgos.length) linea(`Riesgos: ${v.riesgos.join(" · ")}`);
+    linea(`Siguiente paso: ${v.siguiente_paso}` + NL);
+    linea(`PROBLEMA MACRO (evitar): ${pu.problema_macro_a_evitar}`);
+    linea(`PROBLEMA A ATACAR: "${pu.problema_urgente_especifico}"` + NL + pu.por_que_es_especifico + NL);
+    linea(`PRODUCTO: ${p.nombre}`);
+    linea(`Mecanismo: ${p.mecanismo_unico}`);
+    linea(`Promesa: ${p.promesa}`);
+    linea(`Formato: ${p.formato}`);
+    if (p.que_incluye && p.que_incluye.length) linea(`Incluye: ${p.que_incluye.join(", ")}`);
+    linea(`Precio sugerido: US$ ${p.precio_sugerido_usd} — ${p.justificacion_precio}` + NL);
+    linea("FRASES QUE SE REPITEN");
+    (m.frases_repetidas || []).forEach(f => linea(`- "${f.frase}" (${f.frecuencia}): ${f.que_revela}`));
+    linea(NL + "LO QUE YA INTENTARON Y NO FUNCIONÓ");
+    (m.intentos_fallidos || []).forEach(i => linea(`- ${i.que_intentaron}: ${i.por_que_fallo}`));
+    linea(NL + "RESULTADO QUE REALMENTE BUSCAN");
+    linea(`Dicen: ${m.resultado_deseado.lo_que_dicen}`);
+    linea(`En realidad: ${m.resultado_deseado.lo_que_realmente_buscan}`);
+    linea(NL + `DOLOR EMOCIONAL: ${m.dolor_emocional.intensidad}/10 (${(m.dolor_emocional.emociones || []).join(", ")})`);
+    linea(m.dolor_emocional.costo_de_seguir_igual);
+    linea(NL + `DISPOSICIÓN A PAGAR: ${m.disposicion_a_pagar.nivel}`);
+    (m.disposicion_a_pagar.senales || []).forEach(x => linea(`- ${x}`));
+    linea(`En qué ya gastan: ${m.disposicion_a_pagar.en_que_ya_gastan}`);
+    linea(NL + "BRECHA DE OPORTUNIDAD");
+    linea(m.brecha_oportunidad.descripcion);
+    linea(m.brecha_oportunidad.por_que_no_esta_resuelto);
+  } else if (data.analisis) {
+    const a = data.analisis;
+    linea(`RADAR — ${data.consulta || ""}`);
+    linea(`${data.total_comentarios} comentarios · ${data.fuente}` + NL);
+    linea("RESUMEN" + NL + a.resumen + NL);
+    [["dolores", "DOLORES"], ["objeciones", "OBJECIONES"], ["deseos", "DESEOS"]].forEach(([k, t]) => {
+      linea(t);
+      (a[k] || []).forEach(i => {
+        linea(`- ${i.tema} (frecuencia ${i.frecuencia})`);
+        (i.ejemplos || []).forEach(q => linea(`    "${q}"`));
+      });
+      linea("");
+    });
+  }
+  linea(NL + "Generado con TΛLENO OS · __CONTACTO__");
+  return L.join(NL);
+}
 
 function fuentes(data) {
   if (!data.videos || !data.videos.length) return "";
@@ -1150,7 +1224,7 @@ function fuentes(data) {
 function renderRadar(data) {
   const a = data.analisis;
   const CATS = [["dolores", "Dolores", "var(--dolor)"], ["objeciones", "Objeciones", "var(--objecion)"], ["deseos", "Deseos", "var(--deseo)"]];
-  let html = `<div class="summary"><p>${esc(a.resumen)}</p><div class="meta">${data.total_comentarios} comentarios · ${esc(data.fuente)}</div></div>`;
+  let html = acciones() + `<div class="summary"><p>${esc(a.resumen)}</p><div class="meta">${data.total_comentarios} comentarios · ${esc(data.fuente)}</div></div>`;
   for (const [key, label, color] of CATS) {
     const items = a[key] || [];
     html += `<section style="--c:${color}"><h2><span class="dot"></span>${label} <span class="count">(${items.length})</span></h2>`;
@@ -1171,7 +1245,7 @@ function colorVeredicto(rec) {
 function renderAnalista(data) {
   const m = data.mercado, v = m.veredicto, p = m.propuesta_producto, pu = m.problema_urgente;
   const d = m.dolor_emocional, pay = m.disposicion_a_pagar, r = m.resultado_deseado, b = m.brecha_oportunidad;
-  let html = `<div class="summary"><p>${esc(m.resumen_ejecutivo)}</p><div class="meta">${data.total_comentarios} comentarios · ${esc(data.fuente)}</div></div>`;
+  let html = acciones() + `<div class="summary"><p>${esc(m.resumen_ejecutivo)}</p><div class="meta">${data.total_comentarios} comentarios · ${esc(data.fuente)}</div></div>`;
   html += `<div class="verdict" style="--v:${colorVeredicto(v.recomendacion)}">
     <div class="top"><span class="rec">${esc(v.recomendacion)}</span><span class="score">Oportunidad ${v.puntuacion}/10</span></div>
     <p>${esc(v.justificacion)}</p>
@@ -1210,6 +1284,139 @@ function renderAnalista(data) {
   return html + fuentes(data);
 }
 
+
+let comentariosExtraidos = [];
+
+function bloqueComentarios(data) {
+  if (!data.comentarios || !data.comentarios.length) return "";
+  comentariosExtraidos = data.comentarios;
+  return `<section class="extraidos">
+    <h2>Comentarios extraídos <span class="count">(${data.comentarios.length})</span></h2>
+    <div class="acciones">
+      <button type="button" class="tab" id="copiar">⧉ Copiar todos</button>
+      <button type="button" class="tab destacado" id="alAnalista">→ Analizar con el Analista</button>
+    </div>
+    <p id="copiaStatus" class="counter"></p>
+    <pre class="crudos">${esc(data.comentarios.join("\\n"))}</pre>
+  </section>`;
+}
+
+let ultimoInforme = null;
+
+async function alPortapapeles(texto, mensaje) {
+  try {
+    await navigator.clipboard.writeText(texto);
+  } catch (err) {
+    const ta = document.createElement("textarea");
+    ta.value = texto; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove();
+  }
+  const s = el("accionStatus") || el("copiaStatus");
+  if (s) s.textContent = mensaje;
+}
+
+function conectarBotones(data) {
+  if (data) ultimoInforme = data;
+  const pdf = el("pdf"), copiarInf = el("copiarInforme");
+  if (pdf) pdf.addEventListener("click", () => window.print());
+  if (copiarInf) copiarInf.addEventListener("click", () =>
+    alPortapapeles(informeTexto(ultimoInforme || {}), "Informe copiado como texto."));
+  const copiar = el("copiar"), alAnalista = el("alAnalista");
+  if (copiar) copiar.addEventListener("click", () =>
+    alPortapapeles(comentariosExtraidos.join("\\n"),
+      `${comentariosExtraidos.length} comentarios copiados al portapapeles.`));
+  if (alAnalista) alAnalista.addEventListener("click", () => {
+    try { sessionStorage.setItem("comentarios_radar", comentariosExtraidos.join("\\n")); } catch (e) {}
+    window.location.href = "/cerebro/analista";
+  });
+}
+
+"""
+
+
+BRAIN_JS = """
+const MODO = "__MODO__";
+const SOURCES = {
+  "paste": { endpoint: "/paste", hint: "Pega los comentarios, uno por línea. Lo ideal son 200-300.",
+    wait: "Analizando los comentarios.", body: () => ({ texto: el("texto").value }) },
+  "yt-search": { endpoint: "/youtube/search", type: "text", placeholder: "Ej: cómo emprender con poco dinero",
+    hint: "Escribe un tema. Buscamos videos en español con más comentarios y los analizamos juntos.",
+    wait: "Buscando videos y leyendo sus comentarios.", body: () => ({ query: el("field").value.trim(), max_videos: Number(el("nvideos").value) }) },
+  "yt-video": { endpoint: "/youtube/video", type: "url", placeholder: "https://www.youtube.com/watch?v=...",
+    hint: "Pega el enlace de un video de YouTube (también sirven Shorts).",
+    wait: "Leyendo los comentarios del video.", body: () => ({ url: el("field").value.trim() }) },
+  "facebook": { endpoint: "/analyze", type: "url", placeholder: "https://www.facebook.com/...",
+    hint: "Pega el enlace de una publicación pública de Facebook. Puede tardar de 1 a 3 minutos.",
+    wait: "Leyendo comentarios de Facebook.", body: () => ({ url: el("field").value.trim() }) },
+};
+const BLOQUEADAS = __BLOQUEADAS__;
+let src = "__INICIAL__";
+
+function avisoSuscriptor() {
+  el("status").className = "status aviso";
+  el("status").innerHTML = "🔒 <strong>Facebook es para suscriptores.</strong> " +
+    "Extraer comentarios de Facebook tiene un costo por publicación, así que está reservado al plan de pago. " +
+    "Mientras tanto, YouTube y pegar comentarios funcionan sin límite de fuentes.";
+}
+
+function setSource(s) {
+  if (BLOQUEADAS.includes(s)) { avisoSuscriptor(); return; }
+  src = s; const cfg = SOURCES[s];
+  document.querySelectorAll("#sources .tab").forEach(t => t.setAttribute("aria-pressed", String(t.dataset.src === s)));
+  el("pasteBox").hidden = s !== "paste";
+  el("lineBox").hidden = s === "paste";
+  el("texto").required = s === "paste";
+  el("field").required = s !== "paste";
+  if (cfg.type) { el("field").type = cfg.type; el("field").placeholder = cfg.placeholder; el("field").value = ""; }
+  el("nvideos").hidden = s !== "yt-search";
+  el("hint").textContent = cfg.hint;
+}
+document.querySelectorAll("#sources .tab").forEach(t => t.addEventListener("click", () => setSource(t.dataset.src)));
+el("texto").addEventListener("input", () => {
+  const n = el("texto").value.split("\\n").filter(l => l.trim().length >= 3).length;
+  el("counter").textContent = `${n} comentarios detectados` + (n && n < 50 ? " · con menos de 50 el análisis será poco confiable" : "");
+});
+setSource(src);
+
+// Si venimos del Radar, precargamos los comentarios que trajo
+try {
+  const traidos = sessionStorage.getItem("comentarios_radar");
+  if (traidos && el("texto")) {
+    sessionStorage.removeItem("comentarios_radar");
+    el("texto").value = traidos;
+    el("texto").dispatchEvent(new Event("input"));
+    el("status").textContent = "Comentarios traídos del Radar. Dale a Analizar.";
+    el("texto").scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+} catch (e) {}
+
+const CLAVE_ULTIMO = "ultimo_resultado_" + MODO;
+function guardarResultado(data) {
+  try { sessionStorage.setItem(CLAVE_ULTIMO, JSON.stringify({ data: data, fecha: Date.now() })); } catch (e) {}
+}
+
+function pintar(data, recuperado) {
+  el("results").innerHTML = (data.mercado ? renderAnalista(data) : renderRadar(data)) +
+    (recuperado ? `<p class="recuperado">Este es tu último análisis, guardado en este navegador.
+      <button type="button" class="tab" id="limpiar">Borrar y empezar de nuevo</button></p>` : "");
+  conectarBotones(data);
+  const limpiar = el("limpiar");
+  if (limpiar) limpiar.addEventListener("click", () => {
+    try { sessionStorage.removeItem(CLAVE_ULTIMO); } catch (e) {}
+    el("results").innerHTML = ""; el("fbBox").hidden = true; el("status").textContent = "";
+  });
+  el("fbBox").hidden = false;
+}
+
+function recuperarResultado() {
+  try {
+    const guardado = sessionStorage.getItem(CLAVE_ULTIMO);
+    if (!guardado) return;
+    const { data } = JSON.parse(guardado);
+    if (data) pintar(data, true);
+  } catch (e) {}
+}
+
 let fbUtil = null;
 document.querySelectorAll(".fbrow .tab").forEach(b => b.addEventListener("click", () => {
   fbUtil = b.dataset.util === "1";
@@ -1225,13 +1432,19 @@ el("fbEnviar").addEventListener("click", async () => {
   } catch (err) { s.className = "status error"; s.textContent = "No se pudo enviar."; }
 });
 
+recuperarResultado();
+
+let analizando = false;
+window.addEventListener("beforeunload", (e) => {
+  if (analizando) { e.preventDefault(); e.returnValue = ""; }
+});
+
 el("form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const cfg = SOURCES[src];
-  el("results").innerHTML = "";
   el("status").className = "status";
   el("status").innerHTML = `<span class="spinner"></span>${cfg.wait}`;
-  el("btn").disabled = true; el("btn").textContent = "Analizando…";
+  el("btn").disabled = true; el("btn").textContent = "Analizando…"; analizando = true;
   try {
     const body = { ...cfg.body(), modo: MODO, nicho: el("nicho").value.trim() || null };
     const res = await fetch(cfg.endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -1244,10 +1457,9 @@ el("form").addEventListener("submit", async (e) => {
       throw new Error(msg);
     }
     el("status").textContent = "";
-    el("results").innerHTML = data.mercado ? renderAnalista(data) : renderRadar(data);
-    conectarBotones();
+    guardarResultado(data);
+    pintar(data, false);
     el("results").scrollIntoView({ behavior: "smooth", block: "start" });
-    el("fbBox").hidden = false;
     if (data.restantes !== null && data.restantes !== undefined) {
       el("status").className = "status";
       el("status").textContent = data.restantes > 0
@@ -1258,7 +1470,7 @@ el("form").addEventListener("submit", async (e) => {
     el("status").className = "status error";
     el("status").textContent = "No se pudo analizar: " + err.message;
   } finally {
-    el("btn").disabled = false; el("btn").textContent = "Analizar";
+    el("btn").disabled = false; el("btn").textContent = "Analizar"; analizando = false;
   }
 });
 """
@@ -1362,8 +1574,8 @@ def dash_page(user: str) -> str:
           <span class="pie">⏱ {c['tiempo']}</span></a>"""
     if not is_guest(user):
         tarjetas += """<a class="cerebro proximo" href="/leads">
-          <span class="num">PANEL</span><span class="nombre">Invitados</span>
-          <span class="desc">Correos capturados y feedback recibido.</span></a>"""
+          <span class="num">PANEL</span><span class="nombre">Usuarios</span>
+          <span class="desc">Usuarios registrados, uso y feedback recibido.</span></a>"""
     tarjetas += """<div class="cerebro proximo">
           <span class="num">PRÓXIMAMENTE</span><span class="nombre">Nuevo agente</span>
           <span class="desc">Aquí van los siguientes: copy, oferta, contenido…</span></div>"""
@@ -1396,12 +1608,82 @@ def leads_page(user: str) -> str:
           <span class="fb">{sync}</span></td>
           <td>{l.get('usos',0)} / {GUEST_LIMIT}</td><td>{l.get('creado','')[:10]}</td><td>{fb}</td></tr>"""
     if not filas:
-        filas = '<tr><td colspan="4">Todavía no hay invitados.</td></tr>'
-    contenido = f"""<h1>Invitados</h1>
-      <p class="intro">{len(leads)} correos capturados. El feedback que dejan aparece en la última columna.</p>
+        filas = '<tr><td colspan="4">Todavía no hay usuarios registrados.</td></tr>'
+    contenido = f"""<h1>Usuarios</h1>
+      <p class="intro">{len(leads)} usuarios registrados. El feedback que dejan aparece en la última columna.</p>
       <a class="descarga" href="/leads.csv">↓ Descargar CSV</a>
       <div class="wrap"><table><tr><th>Persona</th><th>Usos</th><th>Desde</th><th>Feedback</th></tr>{filas}</table></div>"""
-    return page("Invitados · TΛLENO OS", contenido, user, "leads", LEADS_CSS)
+    return page("Usuarios · TΛLENO OS", contenido, user, "leads", LEADS_CSS)
+
+
+HIST_CSS = """
+  .hist { display: grid; gap: 12px; }
+  .hist a.fila { background: var(--papel); border: 1px solid var(--linea); border-radius: 14px;
+    padding: 16px 18px; text-decoration: none; display: flex; flex-direction: column; gap: 4px; }
+  .hist a.fila:hover { border-color: var(--naranja); }
+  .hist .tit { font-weight: 700; font-size: 17px; }
+  .hist .sub { color: var(--gris); font-size: 13px; }
+  .pill { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .06em;
+    text-transform: uppercase; padding: 3px 9px; border-radius: 999px; margin-right: 8px; }
+  .pill.radar { background: #e8f1ff; color: #1d4ed8; }
+  .pill.mercado { background: #fff1e9; color: #b8430f; }
+  .barra-detalle { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .borrar { background: none; border: 1.5px solid var(--linea); color: var(--gris); border-radius: 10px;
+    padding: 9px 14px; font: 600 14px inherit; cursor: pointer; }
+  .borrar:hover { border-color: var(--no); color: var(--no); }
+"""
+
+HIST_JS = """
+const borrar = document.getElementById("borrarAnalisis");
+if (borrar) borrar.addEventListener("click", async () => {
+  if (!confirm("¿Borrar este análisis del historial? No se puede deshacer.")) return;
+  const res = await fetch("/api/historial/" + borrar.dataset.id, { method: "DELETE" });
+  if (res.ok) window.location.href = "/historial";
+});
+"""
+
+
+def historial_page(user: str) -> str:
+    filas_db = historial_listar(user)
+    if not USA_SUPABASE:
+        cuerpo = '<p class="empty">El historial necesita Supabase configurado.</p>'
+    elif not filas_db:
+        cuerpo = '<p class="empty">Todavía no has hecho ningún análisis. Empieza por el Radar.</p>'
+    else:
+        tarjetas = ""
+        for f in filas_db:
+            agente = "mercado" if f.get("agente") == "mercado" else "radar"
+            nombre_agente = "Analista" if agente == "mercado" else "Radar"
+            fecha = (f.get("creado") or "")[:16].replace("T", " ")
+            tarjetas += f"""<a class="fila" href="/historial/{f.get('id')}">
+              <span class="tit">{(f.get('titulo') or 'Análisis')}</span>
+              <span class="sub"><span class="pill {agente}">{nombre_agente}</span>
+                {f.get('total_comentarios', 0)} comentarios · {f.get('fuente','')} · {fecha}</span></a>"""
+        cuerpo = f'<div class="hist">{tarjetas}</div>'
+    contenido = f"""<h1>Historial</h1>
+      <p class="intro">Todos tus análisis guardados. Ábrelos cuando quieras, desde cualquier dispositivo.</p>
+      {cuerpo}"""
+    return page("Historial · TΛLENO OS", contenido, user, "historial", RESULT_CSS + HIST_CSS)
+
+
+def historial_detalle_page(user: str, fila: dict) -> str:
+    agente = "Analista de Mercado" if fila.get("agente") == "mercado" else "Radar"
+    fecha = (fila.get("creado") or "")[:16].replace("T", " ")
+    contenido = f"""<h1>{fila.get('titulo') or 'Análisis'}</h1>
+      <p class="intro">{agente} · {fila.get('total_comentarios', 0)} comentarios · {fila.get('fuente','')} · {fecha}</p>
+      <div class="barra-detalle">
+        <a class="tab" href="/historial">← Volver al historial</a>
+        <button type="button" class="borrar" id="borrarAnalisis" data-id="{fila.get('id')}">Borrar</button>
+      </div>
+      <div id="results"></div>
+      <p class="pie-impresion">© {ANIO} Richard Taleno · Todos los derechos reservados · Generado con TΛLENO OS · Consultas: {CONTACT_EMAIL}</p>"""
+    datos = json.dumps(fila.get("datos") or {})
+    script = RENDER_JS.replace("__CONTACTO__", PIE_TEXTO) + f"""
+const DATOS = {datos};
+el("results").innerHTML = DATOS.mercado ? renderAnalista(DATOS) : renderRadar(DATOS);
+conectarBotones(DATOS);
+""" + HIST_JS
+    return page("Análisis · TΛLENO OS", contenido, user, "historial", RESULT_CSS + HIST_CSS, script)
 
 
 def brain_page(slug: str, user: str) -> str:
@@ -1412,12 +1694,14 @@ def brain_page(slug: str, user: str) -> str:
         "yt-video": "Video de YouTube",
         "facebook": "Facebook",
     }
-    fuentes = [f for f in c.get("fuentes", ["paste"])
-               if not (f == "facebook" and is_guest(user) and not GUEST_FULL)]
-    primera = fuentes[0]
+    fuentes = list(c.get("fuentes", ["paste"]))
+    bloqueadas = ["facebook"] if (is_guest(user) and not GUEST_FULL and "facebook" in fuentes) else []
+    primera = next(f for f in fuentes if f not in bloqueadas)
     if len(fuentes) > 1:
         botones = "".join(
-            f'<button class="tab" data-src="{f}" aria-pressed="{"true" if f == primera else "false"}">{etiquetas[f]}</button>'
+            f'<button class="tab{" bloqueada" if f in bloqueadas else ""}" data-src="{f}" '
+            f'aria-pressed="{"true" if f == primera else "false"}">'
+            f'{"🔒 " if f in bloqueadas else ""}{etiquetas[f]}</button>'
             for f in fuentes)
         selector = f'<div class="label">Fuente de los comentarios</div><div class="tabs" id="sources">{botones}</div>'
     else:
@@ -1446,6 +1730,7 @@ def brain_page(slug: str, user: str) -> str:
       </form>
       <p id="status" class="status" role="status"></p>
       <div id="results"></div>
+      <p class="pie-impresion">© {ANIO} Richard Taleno · Todos los derechos reservados · Generado con TΛLENO OS · Consultas: {CONTACT_EMAIL}</p>
       <div id="fbBox" class="fbbox" hidden>
         <strong>¿Te sirvió este análisis?</strong>
         <div class="fbrow">
@@ -1456,7 +1741,8 @@ def brain_page(slug: str, user: str) -> str:
         <button type="button" id="fbEnviar" class="submit">Enviar comentario</button>
         <p id="fbStatus" class="status"></p>
       </div>"""
-    script = BRAIN_JS.replace("__MODO__", c["modo"]).replace("__INICIAL__", primera)
+    script = RENDER_JS.replace("__CONTACTO__", PIE_TEXTO) + (BRAIN_JS.replace("__MODO__", c["modo"]).replace("__INICIAL__", primera)
+                          .replace("__BLOQUEADAS__", json.dumps(bloqueadas)))
     return page(f"{c['nombre']} · TΛLENO OS", contenido, user, slug, RESULT_CSS, script)
 
 
@@ -1468,15 +1754,24 @@ class LoginRequest(BaseModel):
     password: str
 
 
-async def build_response(fuente, consulta, comments, modo, result, user, videos=None) -> AnalyzeResponse:
+async def build_response(fuente, consulta, comments, modo, result, user,
+                         videos=None, titulo=None) -> AnalyzeResponse:
     restantes = None
     if is_guest(user):
         restantes = await lead_consumir_uso(guest_email(user))
-    return AnalyzeResponse(
+    respuesta = AnalyzeResponse(
         fuente=fuente, consulta=consulta, total_comentarios=len(comments),
         modelo=GEMINI_MODEL, modo=modo, videos=videos or [], restantes=restantes,
         comentarios=comments if modo == "rapido" else [], **result,
     )
+    try:
+        historial_guardar(
+            usuario=user, agente=modo, titulo=(titulo or consulta or "Análisis"),
+            fuente=fuente, total=len(comments), datos=respuesta.model_dump(mode="json"),
+        )
+    except Exception:
+        logger.exception("No se pudo guardar en el historial")
+    return respuesta
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -1610,6 +1905,31 @@ async def systeme_test(request: Request, email: str = "prueba@ejemplo.com"):
     return {"tag_configurado": SYSTEME_TAG_ID, **info}
 
 
+@app.get("/historial", response_class=HTMLResponse)
+async def ver_historial(request: Request):
+    user = current_user(request)
+    if not user:
+        return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
+    return HTMLResponse(historial_page(user))
+
+
+@app.get("/historial/{id_analisis}", response_class=HTMLResponse)
+async def ver_analisis(id_analisis: str, request: Request):
+    user = current_user(request)
+    if not user:
+        return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
+    fila = historial_abrir(user, id_analisis)
+    if not fila:
+        raise HTTPException(status_code=404, detail="Ese análisis no existe o no es tuyo.")
+    return HTMLResponse(historial_detalle_page(user, fila))
+
+
+@app.delete("/api/historial/{id_analisis}")
+async def borrar_analisis(id_analisis: str, user: str = Depends(require_user)):
+    historial_borrar(user, id_analisis)
+    return {"ok": True}
+
+
 @app.get("/leads", response_class=HTMLResponse)
 async def ver_leads(request: Request):
     user = current_user(request)
@@ -1664,7 +1984,8 @@ async def analyze_pasted(req: PasteRequest, user: str = Depends(require_user)):
     if len(comments) < 10:
         raise HTTPException(status_code=400, detail="Pega al menos 10 comentarios, uno por línea (lo ideal son 200-300).")
     result = await run_analysis(comments, "comentarios pegados de redes sociales", req.modo, req.nicho, modelo_para(user))
-    return await build_response("Comentarios pegados", "texto pegado", comments, req.modo, result, user)
+    titulo = (req.nicho or "").strip() or f"{len(comments)} comentarios pegados"
+    return await build_response("Comentarios pegados", "texto pegado", comments, req.modo, result, user, titulo=titulo)
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -1699,7 +2020,8 @@ async def analyze_youtube_video(req: AnalyzeRequest, user: str = Depends(require
     if not comments:
         raise HTTPException(status_code=404, detail="Este video no tiene comentarios o los tiene desactivados.")
     result = await run_analysis(comments, f'un video de YouTube titulado "{videos[0]["titulo"]}"', req.modo, req.nicho, modelo_para(user))
-    return await build_response("YouTube", url, comments, req.modo, result, user, info)
+    return await build_response("YouTube", url, comments, req.modo, result, user, info,
+                                titulo=videos[0]["titulo"])
 
 
 @app.post("/youtube/search", response_model=AnalyzeResponse)
@@ -1727,4 +2049,5 @@ async def analyze_youtube_search(req: YouTubeSearchRequest, user: str = Depends(
     if not comments:
         raise HTTPException(status_code=404, detail="No pude leer comentarios de los videos encontrados.")
     result = await run_analysis(comments, f'varios videos de YouTube sobre "{query}"', req.modo, req.nicho or query, modelo_para(user))
-    return await build_response(f"YouTube · {len(info)} videos", query, comments, req.modo, result, user, info)
+    return await build_response(f"YouTube · {len(info)} videos", query, comments, req.modo, result, user, info,
+                                titulo=query)
