@@ -123,16 +123,22 @@ def _sb_headers() -> dict:
     }
 
 
+_sb_ultimo_error = {"detalle": ""}
+
+
 def _sb(metodo: str, params: dict = None, payload=None) -> list:
     url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/leads"
     try:
         with httpx.Client(timeout=15, headers=_sb_headers()) as client:
             resp = client.request(metodo, url, params=params, json=payload)
         if resp.status_code >= 400:
-            logger.warning("Supabase %s -> %s: %s", metodo, resp.status_code, resp.text[:200])
+            _sb_ultimo_error["detalle"] = f"{metodo} {resp.status_code}: {resp.text[:300]}"
+            logger.warning("Supabase %s -> %s: %s", metodo, resp.status_code, resp.text[:300])
             return []
+        _sb_ultimo_error["detalle"] = ""
         return resp.json() if resp.text else []
-    except Exception:
+    except Exception as exc:
+        _sb_ultimo_error["detalle"] = f"Error de conexión: {exc}"
         logger.exception("Supabase: error de conexión")
         return []
 
@@ -1532,6 +1538,32 @@ async def enviar_feedback(req: FeedbackRequest, user: str = Depends(require_user
     else:
         logger.info("Feedback de %s: %s %s", user, req.util, req.texto[:200])
     return {"ok": True}
+
+
+@app.get("/supabase/test")
+async def supabase_test(request: Request):
+    """Diagnóstico: escribe y lee un registro de prueba en la tabla leads."""
+    user = current_user(request)
+    if not user or is_guest(user):
+        raise HTTPException(status_code=401, detail="Necesitas entrar con tu cuenta.")
+    if not USA_SUPABASE:
+        return {"almacen": "archivo local", "detalle": "Faltan SUPABASE_URL o SUPABASE_KEY en Render."}
+
+    correo = "prueba-diagnostico@taleno.test"
+    lead = _lead_nuevo(correo, "Prueba")
+    lead["feedback"] = [{"util": True, "texto": "escritura de prueba", "fecha": lead["creado"]}]
+    _lead_upsert(lead)
+    error_escritura = _sb_ultimo_error["detalle"]
+    leido = lead_get(correo)
+    return {
+        "almacen": "supabase",
+        "escritura_ok": not error_escritura,
+        "error_escritura": error_escritura,
+        "lectura_ok": bool(leido),
+        "feedback_leido": (leido or {}).get("feedback"),
+        "ultimo_error": _sb_ultimo_error["detalle"],
+        "total_filas": len(_read_leads()),
+    }
 
 
 @app.get("/systeme/tags")
