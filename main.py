@@ -60,6 +60,7 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "1") != "0"   # ponlo en 0 solo para 
 GUEST_MODE = os.getenv("GUEST_MODE", "0") == "1"         # 1 = permite entrar sin cuenta
 GUEST_FULL = os.getenv("GUEST_FULL", "0") == "1"         # 1 = los invitados también pueden usar Facebook (cuesta Apify)
 GUEST_LIMIT = int(os.getenv("GUEST_LIMIT", "3"))         # análisis gratis por correo
+COPY_GUEST_LIMIT = int(os.getenv("COPY_GUEST_LIMIT", "1"))  # piezas de copy gratis por correo
 GUEST_MODEL = os.getenv("GUEST_MODEL", "gemini-3.5-flash-lite")  # modelo barato para invitados
 DATA_DIR = os.getenv("DATA_DIR", "/tmp")                 # carpeta donde se guardan los leads
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
@@ -260,20 +261,40 @@ def historial_guardar(usuario: str, agente: str, titulo: str, fuente: str,
 def historial_listar(usuario: str, limite: int = 50) -> list:
     if not USA_SUPABASE:
         return []
-    return _sb_tabla("analisis", "GET", params={
-        "usuario": f"eq.{usuario}",
-        "select": "id,agente,titulo,fuente,total_comentarios,creado",
-        "order": "creado.desc", "limit": limite,
-    })
+    base = {"usuario": f"eq.{usuario}",
+            "select": "id,agente,titulo,fuente,total_comentarios,creado",
+            "limit": limite}
+    filas = _sb_tabla("analisis", "GET", params={**base, "order": "creado.desc"})
+    if not filas and _sb_ultimo_error["detalle"]:
+        logger.warning("Historial: reintento sin ordenar (%s)", _sb_ultimo_error["detalle"])
+        filas = _sb_tabla("analisis", "GET", params=base)
+        filas = sorted(filas, key=lambda f: f.get("creado") or "", reverse=True)
+    return filas
 
 
-def historial_abrir(usuario: str, id_analisis: str) -> Optional[dict]:
+def historial_abrir(usuario: str, id_analisis: str, admin: bool = False) -> Optional[dict]:
     if not USA_SUPABASE:
         return None
-    filas = _sb_tabla("analisis", "GET", params={
-        "id": f"eq.{id_analisis}", "usuario": f"eq.{usuario}", "select": "*", "limit": 1,
-    })
+    params = {"id": f"eq.{id_analisis}", "select": "*", "limit": 1}
+    if not admin:
+        params["usuario"] = f"eq.{usuario}"
+    filas = _sb_tabla("analisis", "GET", params=params)
     return filas[0] if filas else None
+
+
+def actividad_listar(limite: int = 200) -> list:
+    """Todos los análisis de todos los usuarios (solo para el dueño)."""
+    if not USA_SUPABASE:
+        return []
+    filas = _sb_tabla("analisis", "GET", params={
+        "select": "id,usuario,agente,titulo,fuente,total_comentarios,creado",
+        "order": "creado.desc", "limit": limite,
+    })
+    if not filas and _sb_ultimo_error["detalle"]:
+        filas = _sb_tabla("analisis", "GET", params={
+            "select": "id,usuario,agente,titulo,fuente,total_comentarios,creado", "limit": limite})
+        filas = sorted(filas, key=lambda f: f.get("creado") or "", reverse=True)
+    return filas
 
 
 def historial_borrar(usuario: str, id_analisis: str):
@@ -401,6 +422,27 @@ def check_quota(user: str):
         )
 
 
+def usos_copy(user: str) -> int:
+    """Cuántas piezas de copy lleva este usuario (se cuentan desde el historial)."""
+    if not USA_SUPABASE:
+        return 0
+    filas = _sb_tabla("analisis", "GET", params={
+        "usuario": f"eq.{user}", "agente": "eq.copy", "select": "id", "limit": 50,
+    })
+    return len(filas)
+
+
+def check_quota_copy(user: str):
+    if not is_guest(user):
+        return
+    if usos_copy(user) >= COPY_GUEST_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Ya usaste tu pieza de prueba del agente Copy ({COPY_GUEST_LIMIT} por cuenta). "
+                   "Escríbeme si quieres acceso completo.",
+        )
+
+
 def modelo_para(user: str) -> Optional[str]:
     return GUEST_MODEL if is_guest(user) else None
 
@@ -411,7 +453,7 @@ apify_client = ApifyClientAsync(APIFY_API_TOKEN) if APIFY_API_TOKEN else None
 # ---------------------------------------------------------------------------
 # Modelos
 # ---------------------------------------------------------------------------
-Modo = Literal["rapido", "mercado"]
+Modo = Literal["rapido", "mercado", "copy"]
 
 
 class AnalyzeRequest(BaseModel):
@@ -529,6 +571,63 @@ class MarketReport(BaseModel):
     veredicto: Veredicto
 
 
+# --- Agente Copy ----------------------------------------------------------
+FORMATOS_COPY = {
+    "anuncio": "Anuncio para Meta Ads",
+    "email": "Email",
+    "reel": "Guion de reel (30-60 s)",
+    "post": "Post individual (Facebook / Instagram)",
+    "hilo": "Hilo (Facebook / Threads)",
+}
+ANGULOS_A = {"dolor": "Dolor", "deseo": "Deseo", "objecion": "Objeción"}
+ANGULOS_B = {
+    "storytelling": "Storytelling",
+    "caso": "Caso de estudio",
+    "framework": "Framework de 3 pasos",
+    "desmitificador": "El Desmitificador",
+    "autopsia": "La Autopsia del Error",
+    "contraintuitivo": "El Contra-Intuitivo",
+}
+ESTADOS_PRODUCTO = {
+    "idea": "Todavía es una idea (lista de espera)",
+    "preventa": "En preventa",
+    "listo": "Ya está listo para vender",
+}
+
+
+class BloqueCopy(BaseModel):
+    etiqueta: str = Field(..., description="Nombre del bloque: Texto principal, Titular, Asunto, Gancho (0-3 s)...")
+    texto: str = Field(..., description="El contenido listo para copiar y pegar")
+    nota: Optional[str] = Field(None, description="Indicación breve: duración, texto en pantalla, límite de caracteres")
+
+
+class FraseUsada(BaseModel):
+    frase: str = Field(..., description="La frase textual del mercado")
+    uso: str = Field(..., description="Cómo se usó en la pieza")
+
+
+class PiezaCopy(BaseModel):
+    formato: str = Field(..., description="anuncio | email | reel | post | hilo")
+    angulo: str = Field(..., description="Capa A + Capa B, por ejemplo: Dolor + Storytelling")
+    bloques: List[BloqueCopy]
+    frases_usadas: List[FraseUsada]
+    ajuste_meta: Optional[str] = Field(None, description="Qué se reescribió para cumplir políticas de Meta, si aplicó")
+
+
+class CopyResult(BaseModel):
+    piezas: List[PiezaCopy]
+    prueba_sugerida: str = Field(..., description="Qué pieza publicar primero y por qué, en una sola oración")
+
+
+class CopyRequest(BaseModel):
+    analisis_id: str
+    formato: str = "post"
+    angulo_a: str = "dolor"
+    angulo_b: str = "storytelling"
+    estado: str = "idea"
+    paquete: bool = False
+
+
 class AnalyzeResponse(BaseModel):
     fuente: str
     consulta: str
@@ -540,6 +639,7 @@ class AnalyzeResponse(BaseModel):
     videos: List[VideoInfo] = []
     restantes: Optional[int] = None   # análisis de prueba que le quedan al invitado
     comentarios: List[str] = []       # texto crudo extraído (para copiar o pasar al Analista)
+    copywriting: Optional[CopyResult] = None
     id_analisis: Optional[str] = None   # para encadenar con el agente Copy
 
 
@@ -760,6 +860,44 @@ Reglas de evidencia y honestidad:
 - Escribe en el idioma predominante de los comentarios, claro y directo, para un emprendedor que va a tomar una decisión."""
 
 
+COPY_PROMPT = """Eres COPY, el agente de TΛLENO OS que convierte el informe del Analista de Mercado en contenido de venta listo para publicar. Escribes con las palabras reales del mercado, no con frases genéricas de marketing. Tu trabajo cierra el ciclo: escuchar, decidir, vender.
+
+USA LAS FRASES DEL MERCADO
+- Cada pieza debe usar al menos una frase textual del informe (literal o adaptada).
+- Devuelve siempre las frases que usaste y cómo las usaste.
+- El problema urgente específico y el mecanismo único son los mismos en todas las piezas: lo que cambia es el ángulo.
+- Nunca inventes detalles del producto que no estén en el informe: ni bonos, ni módulos, ni plazos, ni cifras.
+- Si el estado del producto es "idea" o "preventa", escribe como lista de espera o preventa, nunca como si ya se pudiera comprar hoy.
+
+ÁNGULOS
+Capa A (qué ataca): Dolor (lo que le duele hoy), Deseo (lo que quiere lograr), Objeción (lo que le impide comprar).
+Capa B (cómo lo cuenta): Storytelling (historia con conflicto y giro), Caso de estudio (problema, acción, resultado, sin inventar datos), Framework de 3 pasos, El Desmitificador (derriba una creencia falsa), La Autopsia del Error (el error más común y su costo), El Contra-Intuitivo (una idea que va contra lo que todos creen).
+Si te piden varias piezas, no repitas la misma combinación de ángulos en dos piezas.
+
+FORMATOS Y BLOQUES
+- anuncio: bloques "Texto principal" (la primera línea es el gancho y debe funcionar sola; 60-150 palabras), "Titular" (unos 40 caracteres), "Descripción" (unos 30 caracteres) y "Botón sugerido" (Más información / Registrarte / Comprar).
+- email: bloques "Asunto" (hasta 50 caracteres, sin mayúsculas completas ni signos excesivos), "Preencabezado" (hasta 90 caracteres, complementa el asunto) y "Cuerpo" (120-250 palabras, párrafos de 1 a 3 líneas, una sola llamada a la acción).
+- reel: bloques en orden "Gancho (0-3 s)", "Problema", "Razón", "Solución", "CTA". En cada uno, el texto es lo que se dice, y la nota indica el texto en pantalla y la duración aproximada.
+- post: bloques "Gancho", "Cuerpo" (80-200 palabras, líneas cortas) y "Cierre" (una pregunta abierta real).
+- hilo: bloques "Post inicial" (gancho más promesa del hilo), luego "Comentario 1" a "Comentario 4" o "Comentario 5" (una idea por comentario, cada uno entendible por sí solo) y "Comentario final" (conclusión y llamada a la acción).
+Los límites de caracteres son guías de referencia, no reglas exactas: las plataformas los cambian seguido.
+
+FILTRO DE POLÍTICAS DE META (obligatorio)
+Antes de entregar, revisa cada pieza y reescribe lo que incumpla:
+1. Atributos personales: no afirmes ni insinúes características del lector (salud, finanzas, edad, situación personal). Mal: "¿Tú no sabes vender?". Bien: "Muchos emprendedores no saben por dónde empezar a vender". Las frases del mercado en primera persona se adaptan a tercera persona o a lenguaje general.
+2. Resultados y dinero: no prometas ingresos, cifras ni resultados garantizados.
+3. Antes y después: no uses comparaciones exageradas de transformación.
+4. Urgencia falsa: no inventes escasez ni plazos que no existan.
+5. Interacción forzada en contenido orgánico: nada de "comenta SÍ", "etiqueta a 3 amigos" ni "dale like si...". Usa preguntas reales.
+6. Sin testimonios inventados ni citas de personas reales.
+Si reescribiste algo por esta razón, dilo en una línea en el campo de ajuste.
+
+TONO
+Español claro y neutro, tuteo. Directo y cercano, sin tecnicismos ni frases vacías como "revoluciona tu vida" o "el secreto que nadie te cuenta". Frases cortas, una idea por párrafo.
+
+Cierra con una sola oración indicando qué pieza publicar primero y por qué."""
+
+
 RETRYABLE = {429, 500, 503, 504}
 
 
@@ -827,6 +965,63 @@ async def run_analysis(comments: List[str], contexto: str, modo: str, nicho: Opt
     return {"analisis": await _gemini_json(QUICK_PROMPT, user_message, AnalysisResult, modelo)}
 
 
+def resumen_para_copy(datos: dict) -> str:
+    """Convierte el informe guardado en el texto que recibe Copy."""
+    m = datos.get("mercado") or {}
+    p = m.get("propuesta_producto", {})
+    pu = m.get("problema_urgente", {})
+    v = m.get("veredicto", {})
+    partes = [
+        f"PROBLEMA URGENTE ESPECÍFICO: {pu.get('problema_urgente_especifico', '')}",
+        f"(problema macro a evitar: {pu.get('problema_macro_a_evitar', '')})",
+        f"PRODUCTO: {p.get('nombre', '')}",
+        f"MECANISMO ÚNICO: {p.get('mecanismo_unico', '')}",
+        f"PROMESA: {p.get('promesa', '')}",
+        f"FORMATO: {p.get('formato', '')}",
+        f"INCLUYE: {', '.join(p.get('que_incluye') or [])}",
+        f"PRECIO SUGERIDO: US$ {p.get('precio_sugerido_usd', '')}",
+        f"VEREDICTO: {v.get('recomendacion', '')} ({v.get('puntuacion', '')}/10)",
+        f"RESUMEN: {m.get('resumen_ejecutivo', '')}",
+        "",
+        "FRASES TEXTUALES QUE SE REPITEN:",
+    ]
+    for f in (m.get("frases_repetidas") or []):
+        partes.append(f"- \"{f.get('frase','')}\" ({f.get('frecuencia','')}): {f.get('que_revela','')}")
+    partes.append("\nLO QUE YA INTENTARON Y NO FUNCIONÓ:")
+    for i in (m.get("intentos_fallidos") or []):
+        partes.append(f"- {i.get('que_intentaron','')}: {i.get('por_que_fallo','')} | cita: \"{i.get('ejemplo','')}\"")
+    rd = m.get("resultado_deseado", {})
+    partes.append(f"\nRESULTADO QUE BUSCAN: dicen \"{rd.get('lo_que_dicen','')}\"; en realidad buscan {rd.get('lo_que_realmente_buscan','')}")
+    for cita in (rd.get("evidencia") or []):
+        partes.append(f"- cita: \"{cita}\"")
+    de = m.get("dolor_emocional", {})
+    partes.append(f"\nDOLOR EMOCIONAL: {de.get('intensidad','')}/10 ({', '.join(de.get('emociones') or [])}). {de.get('costo_de_seguir_igual','')}")
+    for cita in (de.get("evidencia") or []):
+        partes.append(f"- cita: \"{cita}\"")
+    dp = m.get("disposicion_a_pagar", {})
+    partes.append(f"\nDISPOSICIÓN A PAGAR: {dp.get('nivel','')}. Señales: {'; '.join(dp.get('senales') or [])}")
+    bo = m.get("brecha_oportunidad", {})
+    partes.append(f"\nBRECHA: {bo.get('descripcion','')} — {bo.get('por_que_no_esta_resuelto','')}")
+    return "\n".join(str(x) for x in partes)
+
+
+async def run_copy(datos: dict, formato: str, angulo_a: str, angulo_b: str,
+                   estado: str, paquete: bool, modelo: Optional[str] = None) -> CopyResult:
+    informe = resumen_para_copy(datos)
+    estado_txt = ESTADOS_PRODUCTO.get(estado, ESTADOS_PRODUCTO["idea"])
+    if paquete:
+        pedido = ("Escribe UNA pieza de cada formato: anuncio, email, reel, post e hilo. "
+                  "Usa un ángulo distinto en cada una, empezando por "
+                  f"{ANGULOS_A.get(angulo_a, 'Dolor')} + {ANGULOS_B.get(angulo_b, 'Storytelling')}.")
+    else:
+        pedido = (f"Escribe UNA sola pieza en formato {formato} ({FORMATOS_COPY.get(formato, formato)}), "
+                  f"con el ángulo {ANGULOS_A.get(angulo_a, 'Dolor')} + {ANGULOS_B.get(angulo_b, 'Storytelling')}.")
+
+    mensaje = (f"ESTADO DEL PRODUCTO: {estado_txt}\n\n{pedido}\n\n"
+               f"INFORME DEL ANALISTA DE MERCADO:\n{informe}")
+    return await _gemini_json(COPY_PROMPT, mensaje, CopyResult, modelo)
+
+
 def parse_pasted(texto: str) -> List[str]:
     """Convierte el texto pegado en una lista de comentarios (uno por línea)."""
     lines = []
@@ -860,6 +1055,14 @@ CEREBROS = {
         "desc": "Pega aquí los comentarios (o tráelos desde el Radar). Detecta el problema urgente específico, propone el producto con su mecanismo único y da un veredicto: crear o no crear.",
         "tiempo": "1 a 4 min",
         "fuentes": ["paste"],
+    },
+    "copy": {
+        "nombre": "Copy",
+        "modo": "copy",
+        "lema": "Del informe al contenido que vende",
+        "desc": "Toma un análisis del Analista y escribe el contenido con las palabras reales de tu mercado: anuncio, email, guion de reel, post o hilo. Revisa políticas de Meta antes de entregar.",
+        "tiempo": "20 s a 1 min",
+        "fuentes": ["informe"],
     },
 }
 
@@ -1025,9 +1228,17 @@ RESULT_CSS = """
   .kv { color: var(--gris); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin: 14px 0 2px; }
   .meter { height: 8px; background: var(--linea); border-radius: 99px; overflow: hidden; margin-top: 8px; }
   .meter span { display: block; height: 100%; background: var(--dolor); }
+  .pieza .bloque .item-head { align-items: center; }
+  .texto-copy { white-space: pre-wrap; word-break: break-word; margin: 10px 0 0; font: 15px/1.6 inherit;
+    background: #f7f8fa; border-radius: 10px; padding: 14px; }
+  .nota { color: var(--gris); font-size: 13px; }
+  .ajuste { color: var(--objecion); font-size: 14px; background: #fff8e8; border-radius: 10px; padding: 10px 14px; }
+  .copiar-bloque { padding: 6px 12px; font-size: 13px; }
   .fbbox { margin-top: 36px; background: var(--papel); border: 1px dashed var(--linea); border-radius: 16px; padding: 22px; }
   .fbbox textarea { min-height: 90px; margin-top: 12px; }
   .fbrow { display: flex; gap: 8px; margin-top: 12px; }
+  .check { display: flex; gap: 10px; align-items: center; font-size: 15px; }
+  .check input { width: auto; }
   .fbrow .tab[aria-pressed="true"] { background: var(--naranja); border-color: var(--naranja); color: #fff; }
   .extraidos .acciones { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .extraidos .tab { cursor: pointer; }
@@ -1104,7 +1315,7 @@ def sidebar(user: str, activo: str = "") -> str:
     items = ['<a class="nav" href="/" %s><span class="ic">▦</span><span class="tx">Panel</span></a>'
              % ('aria-current="page"' if activo == "panel" else "")]
     items.append('<div class="grupo">Agentes</div>')
-    iconos = {"radar": "◎", "analista": "⚑"}
+    iconos = {"radar": "◎", "analista": "⚑", "copy": "✎"}
     for slug, c in CEREBROS.items():
         actual = 'aria-current="page"' if activo == slug else ""
         items.append(f'<a class="nav" href="/cerebro/{slug}" {actual}>'
@@ -1120,6 +1331,9 @@ def sidebar(user: str, activo: str = "") -> str:
         actual = 'aria-current="page"' if activo == "leads" else ""
         items.append(f'<a class="nav" href="/leads" {actual}><span class="ic">✉</span>'
                      f'<span class="tx">Usuarios</span></a>')
+        actual = 'aria-current="page"' if activo == "actividad" else ""
+        items.append(f'<a class="nav" href="/actividad" {actual}><span class="ic">▲</span>'
+                     f'<span class="tx">Actividad</span></a>')
     tele = (f'<a class="tele" href="{TELEGRAM_URL}" target="_blank" rel="noopener">✈ Canal de Telegram</a>'
             if TELEGRAM_URL else "")
     items.append(f'<div class="pie-lateral">{tele}'
@@ -1154,6 +1368,29 @@ const el = (id) => document.getElementById(id);
 function esc(t) { const d = document.createElement("div"); d.textContent = t ?? ""; return d.innerHTML; }
 const quotes = (arr, c) => (arr || []).map(q => `<blockquote style="--c:${c}">“${esc(q)}”</blockquote>`).join("");
 const lista = (arr) => (arr && arr.length) ? `<ul>${arr.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="empty">Sin evidencia en los comentarios.</p>`;
+
+function renderCopy(data) {
+  const c = data.copywriting;
+  let html = acciones() + `<div class="summary"><p><strong>Prueba sugerida:</strong> ${esc(c.prueba_sugerida)}</p>
+    <div class="meta">Basado en: ${esc(data.consulta || "")}</div></div>`;
+  for (const pieza of (c.piezas || [])) {
+    html += `<section class="pieza"><h2>${esc(pieza.formato)} <span class="count">· ${esc(pieza.angulo)}</span></h2>`;
+    for (const b of (pieza.bloques || [])) {
+      html += `<div class="item bloque">
+        <div class="item-head"><h3>${esc(b.etiqueta)}</h3>
+          <button type="button" class="tab copiar-bloque no-print">⧉ Copiar</button></div>
+        <pre class="texto-copy">${esc(b.texto)}</pre>
+        ${b.nota ? `<p class="nota">${esc(b.nota)}</p>` : ""}</div>`;
+    }
+    if (pieza.frases_usadas && pieza.frases_usadas.length) {
+      html += `<div class="item"><h3>Frases del mercado usadas</h3><ul>` +
+        pieza.frases_usadas.map(f => `<li>“${esc(f.frase)}” → ${esc(f.uso)}</li>`).join("") + `</ul></div>`;
+    }
+    if (pieza.ajuste_meta) html += `<p class="ajuste">Ajuste Meta: ${esc(pieza.ajuste_meta)}</p>`;
+    html += `</section>`;
+  }
+  return html;
+}
 
 function acciones() {
   return `<div class="acciones-informe no-print">
@@ -1198,6 +1435,22 @@ function informeTexto(data) {
     linea(NL + "BRECHA DE OPORTUNIDAD");
     linea(m.brecha_oportunidad.descripcion);
     linea(m.brecha_oportunidad.por_que_no_esta_resuelto);
+  } else if (data.copywriting) {
+    linea(`COPY — ${data.consulta || ""}` + NL);
+    (data.copywriting.piezas || []).forEach(p => {
+      linea(`--- ${p.formato} · ${p.angulo} ---`);
+      (p.bloques || []).forEach(b => {
+        linea(`[${b.etiqueta}]${b.nota ? " (" + b.nota + ")" : ""}`);
+        linea(b.texto + NL);
+      });
+      if (p.frases_usadas && p.frases_usadas.length) {
+        linea("Frases del mercado usadas:");
+        p.frases_usadas.forEach(f => linea(`- "${f.frase}" → ${f.uso}`));
+      }
+      if (p.ajuste_meta) linea(`Ajuste Meta: ${p.ajuste_meta}`);
+      linea("");
+    });
+    linea(`Prueba sugerida: ${data.copywriting.prueba_sugerida}`);
   } else if (data.analisis) {
     const a = data.analisis;
     linea(`RADAR — ${data.consulta || ""}`);
@@ -1241,6 +1494,13 @@ function colorVeredicto(rec) {
   if (r.startsWith("NO")) return "var(--no)";
   if (r.startsWith("VALID")) return "var(--tal)";
   return "var(--si)";
+}
+
+function botonCopy(data) {
+  if (!data.id_analisis) return "";
+  return `<div class="acciones-informe no-print">
+    <a class="tab destacado" href="/cerebro/copy?analisis=${encodeURIComponent(data.id_analisis)}">✎ Escribir el contenido</a>
+  </div>`;
 }
 
 function renderAnalista(data) {
@@ -1322,6 +1582,12 @@ function conectarBotones(data) {
   if (pdf) pdf.addEventListener("click", () => window.print());
   if (copiarInf) copiarInf.addEventListener("click", () =>
     alPortapapeles(informeTexto(ultimoInforme || {}), "Informe copiado como texto."));
+  document.querySelectorAll(".copiar-bloque").forEach(b => b.addEventListener("click", () => {
+    const pre = b.closest(".bloque").querySelector(".texto-copy");
+    alPortapapeles(pre.textContent, "Bloque copiado.");
+    b.textContent = "✓ Copiado";
+    setTimeout(() => { b.textContent = "⧉ Copiar"; }, 1800);
+  }));
   const copiar = el("copiar"), alAnalista = el("alAnalista");
   if (copiar) copiar.addEventListener("click", () =>
     alPortapapeles(comentariosExtraidos.join("\\n"),
@@ -1397,6 +1663,7 @@ function guardarResultado(data) {
 }
 
 function pintarSegunAgente(data) {
+  if (data.copywriting) return renderCopy(data);
   if (data.mercado) return renderAnalista(data);
   return renderRadar(data);
 }
@@ -1492,7 +1759,12 @@ LOGIN_CSS = """
   .invitado { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--linea); }
   .invitado > span { display: block; font-weight: 700; margin-bottom: 12px; }
   .invitado .submit { background: var(--tinta); }
-  .invitado small { display: block; color: var(--gris); margin-top: 10px; }
+  .letra-chica { color: var(--gris); font-size: 12px; line-height: 1.5; margin: 14px 0 0; }
+  .acceso { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--linea); text-align: center; }
+  .acceso a { color: var(--gris); font-size: 14px; text-decoration: none; }
+  .acceso a:hover { color: var(--naranja); }
+  #cajaAdmin { margin-top: 14px; }
+  #cajaAdmin .submit { background: var(--tinta); }
 """
 
 
@@ -1511,8 +1783,17 @@ if (guest) guest.addEventListener("submit", async (e) => {
   } catch (err) { s.className = "status error"; s.textContent = err.message; }
 });
 
+const verAdmin = document.getElementById("verAdmin");
+if (verAdmin) verAdmin.addEventListener("click", (e) => {
+  e.preventDefault();
+  const caja = document.getElementById("cajaAdmin");
+  caja.hidden = !caja.hidden;
+  verAdmin.textContent = caja.hidden ? "¿Ya tienes cuenta? Entrar" : "Volver a la prueba gratis";
+  if (!caja.hidden) document.getElementById("email").focus();
+});
+
 const form = document.getElementById("login");
-form.addEventListener("submit", async (e) => {
+if (form) form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const s = document.getElementById("status");
   s.className = "status"; s.innerHTML = '<span class="spinner"></span>Entrando…';
@@ -1529,26 +1810,40 @@ form.addEventListener("submit", async (e) => {
 
 def login_page(msg: str = "") -> str:
     aviso = f'<p class="status error">{msg}</p>' if msg else ""
-    invitado = (f"""<div class="invitado"><span>¿Primera vez? Prueba gratis</span>
-        <form id="guest">
-          <div class="campo"><input id="gnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
-          <div class="campo"><input id="gemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
-          <button class="submit" type="submit">Probar gratis ({GUEST_LIMIT} análisis)</button>
-        </form>
-        <p id="gstatus" class="status"></p>
-        <small>Te aviso por correo cuando agregue agentes nuevos. Nada de spam.</small></div>""" if GUEST_MODE else "")
-    contenido = f"""<div class="caja">
-      <h1>Entrar</h1>
-      <p>Tus agentes de investigación de mercado, en un solo lugar.</p>
-      {aviso}
-      <form id="login">
-        <div class="campo"><input id="email" type="email" required placeholder="Correo" aria-label="Correo"></div>
-        <div class="campo"><input id="password" type="password" required placeholder="Contraseña" aria-label="Contraseña"></div>
-        <button class="submit" type="submit">Entrar</button>
-      </form>
-      <p id="status" class="status"></p>
-      {invitado}
-    </div>"""
+    if GUEST_MODE:
+        contenido = f"""<div class="caja">
+          <h1>Empieza gratis</h1>
+          <p>Tus agentes de investigación de mercado, en un solo lugar.</p>
+          {aviso}
+          <form id="guest">
+            <div class="campo"><input id="gnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
+            <div class="campo"><input id="gemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
+            <button class="submit" type="submit">Probar gratis ({GUEST_LIMIT} análisis)</button>
+          </form>
+          <p id="gstatus" class="status"></p>
+          <p class="letra-chica">Tus análisis se guardan en tu cuenta. Revisamos el uso para mejorar los agentes. Sin spam.</p>
+          <p class="acceso"><a href="#" id="verAdmin">¿Ya tienes cuenta? Entrar</a></p>
+          <div id="cajaAdmin" hidden>
+            <form id="login">
+              <div class="campo"><input id="email" type="email" required placeholder="Correo" aria-label="Correo"></div>
+              <div class="campo"><input id="password" type="password" required placeholder="Contraseña" aria-label="Contraseña"></div>
+              <button class="submit" type="submit">Entrar</button>
+            </form>
+            <p id="status" class="status"></p>
+          </div>
+        </div>"""
+    else:
+        contenido = f"""<div class="caja">
+          <h1>Entrar</h1>
+          <p>Tus agentes de investigación de mercado, en un solo lugar.</p>
+          {aviso}
+          <form id="login">
+            <div class="campo"><input id="email" type="email" required placeholder="Correo" aria-label="Correo"></div>
+            <div class="campo"><input id="password" type="password" required placeholder="Contraseña" aria-label="Contraseña"></div>
+            <button class="submit" type="submit">Entrar</button>
+          </form>
+          <p id="status" class="status"></p>
+        </div>"""
     return page("Entrar · TΛLENO OS", contenido, None, "", LOGIN_CSS, LOGIN_JS,
                 con_lateral=False, mostrar_entrar=False)
 
@@ -1654,7 +1949,9 @@ def historial_page(user: str) -> str:
     if not USA_SUPABASE:
         cuerpo = '<p class="empty">El historial necesita Supabase configurado.</p>'
     elif not filas_db:
-        cuerpo = '<p class="empty">Todavía no has hecho ningún análisis. Empieza por el Radar.</p>'
+        detalle = _sb_ultimo_error["detalle"]
+        extra = f'<p class="hint">Diagnóstico: {detalle}</p>' if (detalle and not is_guest(user)) else ""
+        cuerpo = '<p class="empty">Todavía no has hecho ningún análisis. Empieza por el Radar.</p>' + extra
     else:
         tarjetas = ""
         for f in filas_db:
@@ -1694,7 +1991,193 @@ conectarBotones(DATOS);
     return page("Análisis · TΛLENO OS", contenido, user, "historial", RESULT_CSS + HIST_CSS, script)
 
 
+COPY_JS = """
+const PAQUETE_OK = __PAQUETE__;
+
+function opcionesFormato() { return el("formato").value; }
+
+el("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = el("analisis").value;
+  if (!id) { el("status").className = "status error"; el("status").textContent = "Elige un análisis primero."; return; }
+  el("status").className = "status";
+  el("status").innerHTML = '<span class="spinner"></span>Escribiendo el contenido.';
+  el("btn").disabled = true; el("btn").textContent = "Escribiendo…";
+  try {
+    const cuerpo = {
+      analisis_id: id, formato: el("formato").value,
+      angulo_a: el("anguloA").value, angulo_b: el("anguloB").value,
+      estado: el("estado").value, paquete: PAQUETE_OK && el("paquete").checked,
+    };
+    const res = await fetch("/copy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cuerpo) });
+    if (res.status === 401) { window.location.href = "/login"; return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo escribir el contenido.");
+    el("status").textContent = "";
+    el("results").innerHTML = renderCopy(data);
+    conectarBotones(data);
+    el("results").scrollIntoView({ behavior: "smooth", block: "start" });
+    el("fbBox").hidden = false;
+  } catch (err) {
+    el("status").className = "status error";
+    el("status").textContent = "No se pudo escribir: " + err.message;
+  } finally {
+    el("btn").disabled = false; el("btn").textContent = "Escribir contenido";
+  }
+});
+
+let fbUtil = null;
+document.querySelectorAll(".fbrow .tab").forEach(b => b.addEventListener("click", () => {
+  fbUtil = b.dataset.util === "1";
+  document.querySelectorAll(".fbrow .tab").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+}));
+el("fbEnviar").addEventListener("click", async () => {
+  const s = el("fbStatus");
+  try {
+    await fetch("/api/feedback", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ util: fbUtil, texto: el("fbTexto").value }) });
+    s.className = "status"; s.textContent = "¡Gracias! Lo leo todo.";
+    el("fbTexto").value = "";
+  } catch (err) { s.className = "status error"; s.textContent = "No se pudo enviar."; }
+});
+
+// Si venimos de un informe, lo dejamos seleccionado
+const params = new URLSearchParams(window.location.search);
+const pre = params.get("analisis");
+if (pre) { const sel = el("analisis"); if ([...sel.options].some(o => o.value === pre)) sel.value = pre; }
+"""
+
+
+def copy_page(user: str) -> str:
+    c = CEREBROS["copy"]
+    informes = [f for f in historial_listar(user, 30) if f.get("agente") == "mercado"]
+    if not informes:
+        aviso = ('<p class="empty">Todavía no tienes informes del Analista de Mercado. '
+                 'Haz uno primero: el Copy escribe a partir de ese informe.</p>'
+                 '<p><a class="tab" href="/cerebro/analista">Ir al Analista</a></p>')
+        return page("Copy · TΛLENO OS", f"<h1>{c['nombre']}</h1><p class=\"intro\">{c['desc']}</p>{aviso}",
+                    user, "copy", RESULT_CSS)
+
+    opciones = "".join(
+        f'<option value="{f.get("id")}">{(f.get("titulo") or "Análisis")} · {(f.get("creado") or "")[:10]}</option>'
+        for f in informes)
+    sel_formato = "".join(f'<option value="{k}">{v}</option>' for k, v in FORMATOS_COPY.items())
+    sel_a = "".join(f'<option value="{k}">{v}</option>' for k, v in ANGULOS_A.items())
+    sel_b = "".join(f'<option value="{k}">{v}</option>' for k, v in ANGULOS_B.items())
+    sel_estado = "".join(f'<option value="{k}">{v}</option>' for k, v in ESTADOS_PRODUCTO.items())
+    puede_paquete = not is_guest(user)
+    paquete_html = ('<label class="check"><input type="checkbox" id="paquete"> '
+                    'Generar el paquete: una pieza de cada formato</label>'
+                    if puede_paquete else
+                    '<p class="hint">🔒 El paquete de 5 formatos está disponible para cuentas.</p>'
+                    '<input type="checkbox" id="paquete" hidden>')
+    limite = ('<p class="hint">Tienes 1 pieza de prueba con este agente.</p>' if is_guest(user) else "")
+
+    contenido = f"""<h1>{c['nombre']}</h1>
+      <p class="intro">{c['desc']}</p>
+      {limite}
+      <form id="form">
+        <div class="label">Informe de base</div>
+        <select id="analisis" aria-label="Análisis">{opciones}</select>
+        <div class="row" style="margin-top:12px">
+          <div><div class="label">Formato</div><select id="formato" aria-label="Formato">{sel_formato}</select></div>
+          <div><div class="label">Estado del producto</div><select id="estado" aria-label="Estado">{sel_estado}</select></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div><div class="label">Qué ataca</div><select id="anguloA" aria-label="Ángulo A">{sel_a}</select></div>
+          <div><div class="label">Cómo lo cuenta</div><select id="anguloB" aria-label="Ángulo B">{sel_b}</select></div>
+        </div>
+        <div style="margin-top:12px">{paquete_html}</div>
+        <button id="btn" class="submit" type="submit">Escribir contenido</button>
+      </form>
+      <p id="status" class="status" role="status"></p>
+      <div id="results"></div>
+      <p class="pie-impresion">© {ANIO} Richard Taleno · Todos los derechos reservados · Generado con TΛLENO OS · Consultas: {CONTACT_EMAIL}</p>
+      <div id="fbBox" class="fbbox" hidden>
+        <strong>¿Te sirvió este contenido?</strong>
+        <div class="fbrow">
+          <button type="button" class="tab" data-util="1">👍 Sí</button>
+          <button type="button" class="tab" data-util="0">👎 No</button>
+        </div>
+        <textarea id="fbTexto" placeholder="¿Qué le falta? ¿Qué cambiarías? (opcional)"></textarea>
+        <button type="button" id="fbEnviar" class="submit">Enviar comentario</button>
+        <p id="fbStatus" class="status"></p>
+      </div>"""
+    script = (RENDER_JS.replace("__CONTACTO__", PIE_TEXTO) +
+              COPY_JS.replace("__PAQUETE__", "true" if puede_paquete else "false"))
+    return page("Copy · TΛLENO OS", contenido, user, "copy", RESULT_CSS, script)
+
+
+ACT_CSS = """
+  .kpis { display: grid; gap: 12px; grid-template-columns: repeat(2, 1fr); margin-bottom: 22px; }
+  @media (min-width: 720px) { .kpis { grid-template-columns: repeat(4, 1fr); } }
+  .kpi { background: var(--papel); border: 1px solid var(--linea); border-radius: 14px; padding: 16px; }
+  .kpi .n { font-size: 26px; font-weight: 700; }
+  .kpi .t { color: var(--gris); font-size: 13px; }
+  .tema { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0;
+    border-bottom: 1px solid var(--linea); font-size: 15px; }
+  .tema span:last-child { color: var(--gris); white-space: nowrap; }
+"""
+
+
+def actividad_page(user: str) -> str:
+    filas = actividad_listar()
+    if not USA_SUPABASE:
+        return page("Actividad · TΛLENO OS", "<h1>Actividad</h1><p class=\"empty\">Necesita Supabase configurado.</p>",
+                    user, "actividad", RESULT_CSS + ACT_CSS)
+
+    usuarios = {}
+    por_agente = {}
+    for f in filas:
+        u = f.get("usuario", "")
+        usuarios[u] = usuarios.get(u, 0) + 1
+        por_agente[f.get("agente", "?")] = por_agente.get(f.get("agente", "?"), 0) + 1
+
+    nombres = {l.get("email"): l.get("nombre") for l in _read_leads().values()}
+
+    def quien(u: str) -> str:
+        if u.startswith(GUEST_PREFIX):
+            correo = u[len(GUEST_PREFIX):]
+            return f'{nombres.get(correo) or correo} <span class="fb">· invitado</span>'
+        return f'{u} <span class="fb">· cuenta</span>'
+
+    kpis = f"""<div class="kpis">
+      <div class="kpi"><div class="n">{len(filas)}</div><div class="t">Análisis</div></div>
+      <div class="kpi"><div class="n">{len(usuarios)}</div><div class="t">Personas</div></div>
+      <div class="kpi"><div class="n">{por_agente.get('rapido', 0)}</div><div class="t">Radar</div></div>
+      <div class="kpi"><div class="n">{por_agente.get('mercado', 0)}</div><div class="t">Analista</div></div>
+    </div>"""
+
+    temas = ""
+    for f in filas[:25]:
+        temas += f"""<div class="tema"><a href="/historial/{f.get('id')}">{f.get('titulo') or 'Análisis'}</a>
+          <span>{(f.get('creado') or '')[:10]}</span></div>"""
+
+    tabla = ""
+    for f in filas[:100]:
+        agente = {"rapido": "Radar", "mercado": "Analista", "copy": "Copy"}.get(f.get("agente"), f.get("agente"))
+        tabla += f"""<tr><td>{quien(f.get('usuario',''))}</td><td>{agente}</td>
+          <td><a href="/historial/{f.get('id')}">{f.get('titulo') or 'Análisis'}</a><br>
+          <span class="fb">{f.get('fuente','')} · {f.get('total_comentarios',0)} comentarios</span></td>
+          <td>{(f.get('creado') or '')[:16].replace('T', ' ')}</td></tr>"""
+    if not tabla:
+        tabla = '<tr><td colspan="4">Todavía no hay análisis.</td></tr>'
+
+    contenido = f"""<h1>Actividad</h1>
+      <p class="intro">Qué está buscando la gente que usa tus agentes. Toca cualquier título para abrir el informe completo.</p>
+      {kpis}
+      <a class="descarga" href="/actividad.csv">↓ Descargar CSV</a>
+      <h2>Últimos temas analizados</h2>
+      <div>{temas or '<p class="empty">Sin datos todavía.</p>'}</div>
+      <h2>Detalle</h2>
+      <div class="wrap"><table>
+        <tr><th>Persona</th><th>Agente</th><th>Análisis</th><th>Fecha</th></tr>{tabla}</table></div>"""
+    return page("Actividad · TΛLENO OS", contenido, user, "actividad", RESULT_CSS + LEADS_CSS + ACT_CSS)
+
+
 def brain_page(slug: str, user: str) -> str:
+    if slug == "copy":
+        return copy_page(user)
     c = CEREBROS[slug]
     etiquetas = {
         "paste": "Pegar comentarios",
@@ -1762,6 +2245,21 @@ class LoginRequest(BaseModel):
     password: str
 
 
+def _titulo_informe(modo: str, result: dict, titulo: Optional[str]) -> str:
+    """Para el Analista, el título sale del propio informe, no del número de comentarios."""
+    if modo == "mercado":
+        informe = result.get("mercado")
+        if informe is not None:
+            datos = informe.model_dump() if hasattr(informe, "model_dump") else informe
+            producto = (datos.get("propuesta_producto") or {}).get("nombre", "").strip()
+            problema = (datos.get("problema_urgente") or {}).get("problema_urgente_especifico", "").strip()
+            if producto and problema:
+                return f"{producto} — {problema[:90]}"
+            if producto or problema:
+                return (producto or problema)[:140]
+    return titulo or "Análisis"
+
+
 async def build_response(fuente, consulta, comments, modo, result, user,
                          videos=None, titulo=None) -> AnalyzeResponse:
     restantes = None
@@ -1774,7 +2272,7 @@ async def build_response(fuente, consulta, comments, modo, result, user,
     )
     try:
         respuesta.id_analisis = historial_guardar(
-            usuario=user, agente=modo, titulo=(titulo or consulta or "Análisis"),
+            usuario=user, agente=modo, titulo=_titulo_informe(modo, result, titulo or consulta),
             fuente=fuente, total=len(comments), datos=respuesta.model_dump(mode="json"),
         )
     except Exception:
@@ -1926,7 +2424,7 @@ async def ver_analisis(id_analisis: str, request: Request):
     user = current_user(request)
     if not user:
         return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
-    fila = historial_abrir(user, id_analisis)
+    fila = historial_abrir(user, id_analisis, admin=not is_guest(user))
     if not fila:
         raise HTTPException(status_code=404, detail="Ese análisis no existe o no es tuyo.")
     return HTMLResponse(historial_detalle_page(user, fila))
@@ -1944,6 +2442,33 @@ async def ver_leads(request: Request):
     if not user or is_guest(user):
         return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
     return HTMLResponse(leads_page(user))
+
+
+@app.get("/actividad", response_class=HTMLResponse)
+async def ver_actividad(request: Request):
+    user = current_user(request)
+    if not user or is_guest(user):
+        return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
+    return HTMLResponse(actividad_page(user))
+
+
+@app.get("/actividad.csv")
+async def actividad_csv(request: Request):
+    user = current_user(request)
+    if not user or is_guest(user):
+        raise HTTPException(status_code=401, detail="Necesitas entrar con tu cuenta.")
+    nombres = {l.get("email"): l.get("nombre") for l in _read_leads().values()}
+    filas = ["usuario,nombre,tipo,agente,titulo,fuente,comentarios,fecha"]
+    for f in actividad_listar(500):
+        u = f.get("usuario", "")
+        invitado = u.startswith(GUEST_PREFIX)
+        correo = u[len(GUEST_PREFIX):] if invitado else u
+        titulo = (f.get("titulo") or "").replace('"', "'")
+        filas.append(f'"{correo}","{nombres.get(correo, "")}","{"invitado" if invitado else "cuenta"}",'
+                     f'"{f.get("agente","")}","{titulo}","{f.get("fuente","")}",'
+                     f'{f.get("total_comentarios", 0)},"{f.get("creado","")}"')
+    return Response("\n".join(filas), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=actividad.csv"})
 
 
 @app.get("/leads.csv")
@@ -1994,6 +2519,47 @@ async def analyze_pasted(req: PasteRequest, user: str = Depends(require_user)):
     result = await run_analysis(comments, "comentarios pegados de redes sociales", req.modo, req.nicho, modelo_para(user))
     titulo = (req.nicho or "").strip() or f"{len(comments)} comentarios pegados"
     return await build_response("Comentarios pegados", "texto pegado", comments, req.modo, result, user, titulo=titulo)
+
+
+@app.post("/copy", response_model=AnalyzeResponse)
+async def generar_copy(req: CopyRequest, user: str = Depends(require_user)):
+    check_quota_copy(user)
+    if req.paquete and is_guest(user):
+        raise HTTPException(status_code=403, detail="El paquete de 5 formatos está disponible para cuentas. Elige un solo formato.")
+
+    fila = historial_abrir(user, req.analisis_id)
+    if not fila:
+        raise HTTPException(status_code=404, detail="No encontré ese análisis en tu historial.")
+    datos = fila.get("datos") or {}
+    if not datos.get("mercado"):
+        raise HTTPException(status_code=400, detail="Copy necesita un informe del Analista de Mercado, no uno del Radar.")
+
+    veredicto = ((datos.get("mercado") or {}).get("veredicto") or {}).get("recomendacion", "").upper()
+    if veredicto.startswith("NO"):
+        raise HTTPException(
+            status_code=400,
+            detail="El Analista recomendó NO CREAR este producto. Analiza otro tema con el Radar antes de escribir contenido de venta.",
+        )
+
+    resultado = await run_copy(datos, req.formato, req.angulo_a, req.angulo_b,
+                               req.estado, req.paquete, modelo_para(user))
+
+    titulo_base = fila.get("titulo") or "Análisis"
+    cuantas = len(resultado.piezas)
+    etiqueta = "paquete de 5 formatos" if req.paquete else FORMATOS_COPY.get(req.formato, req.formato)
+    respuesta = AnalyzeResponse(
+        fuente=f"Copy · {etiqueta}", consulta=titulo_base,
+        total_comentarios=datos.get("total_comentarios", 0),
+        modelo=GEMINI_MODEL, modo="copy", copywriting=resultado,
+    )
+    try:
+        historial_guardar(usuario=user, agente="copy", titulo=f"Copy · {titulo_base}",
+                          fuente=f"{etiqueta} · {cuantas} pieza(s)",
+                          total=datos.get("total_comentarios", 0),
+                          datos=respuesta.model_dump(mode="json"))
+    except Exception:
+        logger.exception("No se pudo guardar el copy en el historial")
+    return respuesta
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
