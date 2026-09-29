@@ -49,6 +49,7 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
+APP_VERSION = "v14-nichos"      # se ve en /health, para saber qué versión está desplegada
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
 ANIO = datetime.now(timezone.utc).year
@@ -317,6 +318,108 @@ def novedades_crear(titulo: str, texto: str) -> Optional[str]:
 def novedades_borrar(id_novedad: str):
     if USA_SUPABASE:
         _sb_tabla("novedades", "DELETE", params={"id": f"eq.{id_novedad}"})
+
+
+def material_listar(limite: int = 20) -> list:
+    """Los últimos análisis con su contenido, para extraer material de posts."""
+    if not USA_SUPABASE:
+        return []
+    filas = _sb_tabla("analisis", "GET", params={
+        "select": "id,usuario,agente,titulo,creado,datos",
+        "order": "creado.desc", "limit": limite})
+    if not filas and _sb_ultimo_error["detalle"]:
+        filas = _sb_tabla("analisis", "GET", params={
+            "select": "id,usuario,agente,titulo,creado,datos", "limit": limite})
+        filas = sorted(filas, key=lambda f: f.get("creado") or "", reverse=True)
+    return filas
+
+
+PALABRAS_VACIAS = {"de","del","la","el","los","las","un","una","unos","unas","en","para","por","con","y","o",
+                   "que","qué","como","cómo","mi","mis","tu","tus","su","sus","se","lo","al","a","the","of",
+                   "es","son","sin","sobre","más","mas","muy","ya","me","te","le"}
+
+
+def _palabras_nicho(texto: str) -> set:
+    """Palabras significativas del tema: minúsculas, sin tildes, sin palabras vacías."""
+    import unicodedata
+    base = unicodedata.normalize("NFKD", (texto or "").lower())
+    base = "".join(c for c in base if not unicodedata.combining(c))
+    return {p for p in re.split(r"[^a-z0-9ñ]+", base) if p and p not in PALABRAS_VACIAS and len(p) > 2}
+
+
+def _mismo_nicho(a: set, b: set) -> bool:
+    """Dos temas son el mismo si comparten lo esencial (no hace falta que coincidan palabra por palabra)."""
+    if not a or not b:
+        return a == b
+    comunes = len(a & b)
+    return comunes >= 2 or comunes == min(len(a), len(b))
+
+
+def _nicho_de(fila: dict) -> str:
+    """El tema que la persona buscó, tal como lo escribió."""
+    datos = fila.get("datos") or {}
+    consulta = (datos.get("consulta") or "").strip()
+    if consulta and consulta != "texto pegado" and not consulta.startswith("http"):
+        return consulta[:90]
+    return (fila.get("titulo") or "Sin tema")[:90]
+
+
+def agrupar_nichos(filas: list) -> list:
+    """Junta los análisis por tema, tolerando que cada quien lo escriba distinto."""
+    grupos = []
+    for f in filas:
+        if f.get("agente") == "copy":
+            continue
+        etiqueta = _nicho_de(f)
+        palabras = _palabras_nicho(etiqueta)
+        destino = next((g for g in grupos if _mismo_nicho(g["palabras"], palabras)), None)
+        if destino is None:
+            destino = {"etiqueta": etiqueta, "palabras": set(), "analisis": [], "personas": set(),
+                       "agentes": set(), "primera": "", "ultima": ""}
+            grupos.append(destino)
+        destino["palabras"] |= palabras
+        destino["analisis"].append(f)
+        destino["personas"].add(f.get("usuario", ""))
+        destino["agentes"].add(f.get("agente", ""))
+        creado = f.get("creado") or ""
+        destino["ultima"] = max(destino["ultima"], creado)
+        destino["primera"] = min(destino["primera"] or creado, creado)
+        if len(etiqueta) < len(destino["etiqueta"]):
+            destino["etiqueta"] = etiqueta
+    return sorted(grupos, key=lambda g: (len(g["personas"]), len(g["analisis"]), g["ultima"]), reverse=True)
+
+
+def extraer_material(datos: dict) -> dict:
+    """Saca de un informe solo lo que sirve para escribir: frases, temas y el problema."""
+    out = {"frases": [], "dolores": [], "objeciones": [], "deseos": [], "problema": "", "producto": ""}
+    m = datos.get("mercado")
+    a = datos.get("analisis")
+    if m:
+        for f in (m.get("frases_repetidas") or []):
+            if f.get("frase"):
+                out["frases"].append(f["frase"])
+        for i in (m.get("intentos_fallidos") or []):
+            if i.get("ejemplo"):
+                out["frases"].append(i["ejemplo"])
+        for cita in ((m.get("dolor_emocional") or {}).get("evidencia") or []):
+            out["frases"].append(cita)
+        for cita in ((m.get("resultado_deseado") or {}).get("evidencia") or []):
+            out["frases"].append(cita)
+        pu = m.get("problema_urgente") or {}
+        out["problema"] = pu.get("problema_urgente_especifico", "")
+        out["producto"] = (m.get("propuesta_producto") or {}).get("nombre", "")
+        out["dolores"] = [i.get("que_intentaron", "") for i in (m.get("intentos_fallidos") or [])]
+    if a:
+        for clave in ("dolores", "objeciones", "deseos"):
+            for item in (a.get(clave) or []):
+                if item.get("tema"):
+                    out[clave].append(item["tema"])
+                for cita in (item.get("ejemplos") or []):
+                    out["frases"].append(cita)
+    # sin repetidas, conservando el orden
+    vistas = set()
+    out["frases"] = [f for f in out["frases"] if not (f in vistas or vistas.add(f))][:12]
+    return out
 
 
 def actividad_listar(limite: int = 200) -> list:
@@ -1384,6 +1487,9 @@ def sidebar(user: str, activo: str = "") -> str:
         actual = 'aria-current="page"' if activo == "actividad" else ""
         items.append(f'<a class="nav" href="/actividad" {actual}><span class="ic">▲</span>'
                      f'<span class="tx">Actividad</span></a>')
+        actual = 'aria-current="page"' if activo == "nichos" else ""
+        items.append(f'<a class="nav" href="/nichos" {actual}><span class="ic">✦</span>'
+                     f'<span class="tx">Nichos</span></a>')
     tele = (f'<a class="tele" href="{TELEGRAM_URL}" target="_blank" rel="noopener">✈ Canal de Telegram</a>'
             if TELEGRAM_URL else "")
     items.append(f'<div class="pie-lateral">{tele}'
@@ -1649,6 +1755,13 @@ function conectarBotones(data) {
   });
 }
 
+
+function pintarSegunAgente(data) {
+  if (data.copywriting) return renderCopy(data);
+  if (data.mercado) return renderAnalista(data);
+  return renderRadar(data);
+}
+
 """
 
 
@@ -1711,12 +1824,6 @@ try {
 const CLAVE_ULTIMO = "ultimo_resultado_" + MODO;
 function guardarResultado(data) {
   try { sessionStorage.setItem(CLAVE_ULTIMO, JSON.stringify({ data: data, fecha: Date.now() })); } catch (e) {}
-}
-
-function pintarSegunAgente(data) {
-  if (data.copywriting) return renderCopy(data);
-  if (data.mercado) return renderAnalista(data);
-  return renderRadar(data);
 }
 
 function pintar(data, recuperado) {
@@ -2255,6 +2362,17 @@ NOV_CSS = """
 NOV_JS = """
 try { localStorage.setItem("novedades_vista", document.body.dataset.ultimaNovedad || ""); } catch (e) {}
 
+try {
+  const b = sessionStorage.getItem("borrador_novedad");
+  if (b && document.getElementById("novTitulo")) {
+    const { titulo, texto } = JSON.parse(b);
+    sessionStorage.removeItem("borrador_novedad");
+    document.getElementById("novTitulo").value = titulo || "";
+    document.getElementById("novTexto").value = texto || "";
+    document.getElementById("novTitulo").scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+} catch (e) {}
+
 const formNov = document.getElementById("formNovedad");
 if (formNov) formNov.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -2311,6 +2429,110 @@ def novedades_page(user: str) -> str:
       <p class="intro">Lo último que se ha sumado a TΛLENO OS.</p>
       {formulario}{lista}"""
     return page("Novedades · TΛLENO OS", contenido, user, "novedades", NOV_CSS, NOV_JS)
+
+
+NICHOS_CSS = """
+  .destacado { background: var(--papel); border: 1px solid var(--linea); border-radius: 16px;
+    padding: 18px 20px; margin-bottom: 14px; }
+  .destacado h2 { font-size: 16px; margin: 0 0 10px; }
+  .fila-nicho { display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px solid var(--linea); }
+  .fila-nicho:last-child { border-bottom: 0; }
+  .fila-nicho .n { font-weight: 600; }
+  .fila-nicho .c { color: var(--gris); font-size: 13px; white-space: nowrap; }
+  .nicho { background: var(--papel); border: 1px solid var(--linea); border-radius: 16px;
+    padding: 18px 20px; margin-bottom: 12px; }
+  .nicho.caliente { border-color: var(--naranja); }
+  .nicho .cab { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .nicho .tema { font-size: 18px; font-weight: 700; }
+  .nicho .meta { color: var(--gris); font-size: 13px; margin-top: 4px; }
+  .nicho .quien { color: var(--gris); font-size: 13px; margin-top: 10px; }
+  .nicho .quien a { color: var(--azul); text-decoration: none; }
+  .nicho .acciones { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .sello { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--naranja); background: #fff1e9; border-radius: 999px; padding: 4px 10px; }
+  .vacio { color: var(--gris); font-size: 14px; }
+"""
+
+NICHOS_JS = """
+document.querySelectorAll(".escribir").forEach(b => b.addEventListener("click", () => {
+  try {
+    sessionStorage.setItem("borrador_novedad", JSON.stringify({
+      titulo: b.dataset.titulo, texto: b.dataset.texto }));
+  } catch (e) {}
+  window.location.href = "/novedades";
+}));
+"""
+
+
+def nichos_page(user: str) -> str:
+    filas = material_listar(120)
+    if not USA_SUPABASE:
+        return page("Nichos · TΛLENO OS", "<h1>Nichos</h1><p class=\"empty\">Necesita Supabase configurado.</p>",
+                    user, "nichos", NICHOS_CSS)
+
+    grupos = agrupar_nichos(filas)
+    nombres = {l.get("email"): l.get("nombre") for l in _read_leads().values()}
+    hace_7 = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    def persona(u: str) -> str:
+        correo = u.replace(GUEST_PREFIX, "")
+        return nombres.get(correo) or correo.split("@")[0]
+
+    # --- tres listas cortas arriba ---
+    repetidos = [g for g in grupos if len(g["personas"]) > 1][:5]
+    nuevos = [g for g in grupos if g["primera"] >= hace_7][:5]
+    sin_analista = [g for g in grupos if "mercado" not in g["agentes"]][:5]
+
+    def mini(lista, texto_derecha):
+        if not lista:
+            return '<p class="vacio">Todavía nada por aquí.</p>'
+        return "".join(f'<div class="fila-nicho"><span class="n">{g["etiqueta"]}</span>'
+                       f'<span class="c">{texto_derecha(g)}</span></div>' for g in lista)
+
+    arriba = f"""<div class="destacado"><h2>🔁 Buscado por varias personas</h2>
+        {mini(repetidos, lambda g: f'{len(g["personas"])} personas · {len(g["analisis"])} análisis')}</div>
+      <div class="destacado"><h2>✨ Nuevos esta semana</h2>
+        {mini(nuevos, lambda g: (g["primera"] or "")[:10])}</div>
+      <div class="destacado"><h2>◎ Se quedaron en el Radar</h2>
+        {mini(sin_analista, lambda g: f'{len(g["analisis"])} análisis')}</div>"""
+
+    # --- detalle por nicho ---
+    tarjetas = ""
+    for g in grupos[:30]:
+        caliente = len(g["personas"]) > 1
+        sello = '<span class="sello">Varias personas</span>' if caliente else ""
+        agentes = ", ".join({"rapido": "Radar", "mercado": "Analista"}.get(a, a) for a in sorted(g["agentes"]))
+        quien = " · ".join(
+            f'<a href="/historial/{f.get("id")}">{persona(f.get("usuario",""))}, {(f.get("creado") or "")[:10]}</a>'
+            for f in g["analisis"][:6])
+
+        titulo_nov = f'Ya puedes analizar {g["etiqueta"].lower()} sin salir de la app'
+        texto_nov = (f'Varias personas están investigando {g["etiqueta"].lower()} estos días. '
+                     if caliente else f'Alguien acaba de investigar {g["etiqueta"].lower()}. ')
+        texto_nov += ("Si es tu nicho, el Radar te trae los comentarios reales de YouTube y el Analista "
+                      "te dice si ahí hay un producto que valga la pena crear.")
+
+        tarjetas += f"""<div class="nicho{' caliente' if caliente else ''}">
+          <div class="cab"><span class="tema">{g['etiqueta']}</span>{sello}</div>
+          <div class="meta">{len(g['analisis'])} análisis · {len(g['personas'])} personas · {agentes} · último {(g['ultima'] or '')[:10]}</div>
+          <div class="quien">{quien}</div>
+          <div class="acciones">
+            <button type="button" class="tab escribir"
+              data-titulo="{titulo_nov.replace(chr(34), '&quot;')}"
+              data-texto="{texto_nov.replace(chr(34), '&quot;')}">★ Escribir novedad</button>
+          </div></div>"""
+
+    if not tarjetas:
+        tarjetas = '<p class="empty">Todavía no hay análisis suficientes.</p>'
+
+    contenido = f"""<h1>Nichos</h1>
+      <p class="intro">Qué temas está investigando la gente en tus agentes. Lo que aparece en varias personas
+        es tema de publicación; lo que aparece una vez, todavía no.</p>
+      {arriba}
+      <h2>Todos los nichos</h2>
+      {tarjetas}"""
+    return page("Nichos · TΛLENO OS", contenido, user, "nichos", NICHOS_CSS, NICHOS_JS)
 
 
 def brain_page(slug: str, user: str) -> str:
@@ -2421,7 +2643,7 @@ async def build_response(fuente, consulta, comments, modo, result, user,
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {
-        "status": "ok", "modelo": GEMINI_MODEL,
+        "status": "ok", "version": APP_VERSION, "modelo": GEMINI_MODEL,
         "facebook": bool(APIFY_API_TOKEN), "youtube": bool(YOUTUBE_API_KEY),
         "usuarios_configurados": len(USERS), "modo_invitado": GUEST_MODE,
         "almacen": "supabase" if USA_SUPABASE else "archivo local",
@@ -2613,6 +2835,14 @@ async def borrar_novedad(id_novedad: str, user: str = Depends(require_user)):
     novedades_borrar(id_novedad)
     ULTIMA_NOVEDAD["revisado"] = 0.0
     return {"ok": True}
+
+
+@app.get("/nichos", response_class=HTMLResponse)
+async def ver_nichos(request: Request):
+    user = current_user(request)
+    if not user or is_guest(user):
+        return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
+    return HTMLResponse(nichos_page(user))
 
 
 @app.get("/actividad", response_class=HTMLResponse)
