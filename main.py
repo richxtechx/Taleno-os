@@ -282,6 +282,43 @@ def historial_abrir(usuario: str, id_analisis: str, admin: bool = False) -> Opti
     return filas[0] if filas else None
 
 
+ULTIMA_NOVEDAD = {"fecha": "", "revisado": 0.0}
+
+
+def ultima_novedad() -> str:
+    """Fecha de la novedad más reciente, cacheada 5 minutos."""
+    import time
+    ahora = time.time()
+    if ahora - ULTIMA_NOVEDAD["revisado"] > 300:
+        ULTIMA_NOVEDAD["revisado"] = ahora
+        filas = novedades_listar(1)
+        ULTIMA_NOVEDAD["fecha"] = (filas[0].get("creado") or "") if filas else ""
+    return ULTIMA_NOVEDAD["fecha"]
+
+
+def novedades_listar(limite: int = 30) -> list:
+    if not USA_SUPABASE:
+        return []
+    filas = _sb_tabla("novedades", "GET", params={
+        "select": "id,titulo,texto,creado", "order": "creado.desc", "limit": limite})
+    if not filas and _sb_ultimo_error["detalle"]:
+        filas = _sb_tabla("novedades", "GET", params={"select": "id,titulo,texto,creado", "limit": limite})
+        filas = sorted(filas, key=lambda f: f.get("creado") or "", reverse=True)
+    return filas
+
+
+def novedades_crear(titulo: str, texto: str) -> Optional[str]:
+    if not USA_SUPABASE:
+        return None
+    creada = _sb_tabla("novedades", "POST", payload={"titulo": titulo[:150], "texto": texto[:4000]})
+    return creada[0].get("id") if creada else None
+
+
+def novedades_borrar(id_novedad: str):
+    if USA_SUPABASE:
+        _sb_tabla("novedades", "DELETE", params={"id": f"eq.{id_novedad}"})
+
+
 def actividad_listar(limite: int = 200) -> list:
     """Todos los análisis de todos los usuarios (solo para el dueño)."""
     if not USA_SUPABASE:
@@ -1114,6 +1151,8 @@ BASE_CSS = """
   .nav .ic { width: 22px; text-align: center; font-size: 16px; flex: none; }
   .nav .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nav.mudo { color: var(--gris); font-weight: 400; cursor: default; }
+  .punto { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--naranja); margin-left: 6px; }
   .pie-lateral { margin-top: auto; padding: 14px 12px; font-size: 12px; color: var(--gris);
     display: flex; flex-direction: column; gap: 4px; }
   .pie-lateral a { color: var(--gris); text-decoration: none; word-break: break-all; }
@@ -1278,6 +1317,14 @@ SHELL_JS = """
     }
   });
   if (velo) velo.addEventListener("click", () => cuerpo.classList.remove("abierta"));
+  try {
+    const ultima = cuerpo.dataset.ultimaNovedad || "";
+    const vista = localStorage.getItem("novedades_vista") || "";
+    const nav = document.getElementById("navNovedades");
+    if (nav && ultima && ultima !== vista && !window.location.pathname.startsWith("/novedades")) {
+      nav.insertAdjacentHTML("beforeend", '<span class="punto" title="Hay novedades"></span>');
+    }
+  } catch (e) {}
 })();
 """
 
@@ -1323,6 +1370,9 @@ def sidebar(user: str, activo: str = "") -> str:
                      f'<span class="tx">{c["nombre"]}</span></a>')
     items.append('<div class="nav mudo"><span class="ic">+</span><span class="tx">Próximamente</span></div>')
     items.append('<div class="grupo">Tu trabajo</div>')
+    actual = 'aria-current="page"' if activo == "novedades" else ""
+    items.append(f'<a class="nav" id="navNovedades" href="/novedades" {actual}>'
+                 f'<span class="ic">★</span><span class="tx">Novedades</span></a>')
     actual = 'aria-current="page"' if activo == "historial" else ""
     items.append(f'<a class="nav" href="/historial" {actual}><span class="ic">◷</span>'
                  f'<span class="tx">Historial</span></a>')
@@ -1348,6 +1398,7 @@ def page(title: str, contenido: str, user: Optional[str] = None, activo: str = "
          mostrar_entrar: bool = True) -> str:
     lateral = sidebar(user, activo) if (con_lateral and user) else ""
     clase = "contenido" if lateral else "contenido solo"
+    ultima = ultima_novedad() if lateral else ""
     return f"""<!DOCTYPE html>
 <html lang="es"><head>
 <meta charset="utf-8">
@@ -1355,7 +1406,7 @@ def page(title: str, contenido: str, user: Optional[str] = None, activo: str = "
 <title>{title}</title>
 {FONTS}
 <style>{BASE_CSS}{extra_css}</style>
-</head><body>
+</head><body data-ultima-novedad="{ultima}">
 {topbar(user, bool(lateral), mostrar_entrar)}
 {lateral}
 <main class="{clase}">{contenido}</main>
@@ -2175,6 +2226,82 @@ def actividad_page(user: str) -> str:
     return page("Actividad · TΛLENO OS", contenido, user, "actividad", RESULT_CSS + LEADS_CSS + ACT_CSS)
 
 
+NOV_CSS = """
+  .novedad { background: var(--papel); border: 1px solid var(--linea); border-radius: 14px;
+    padding: 20px 22px; margin-bottom: 14px; }
+  .novedad h3 { margin: 0 0 4px; font-size: 18px; }
+  .novedad .fecha { color: var(--gris); font-size: 13px; }
+  .novedad .cuerpo { margin-top: 10px; white-space: pre-wrap; }
+  .novedad .quitar { float: right; background: none; border: 0; color: var(--gris); cursor: pointer; font-size: 13px; }
+  .novedad .quitar:hover { color: var(--no); }
+  .caja-nueva { background: var(--papel); border: 1px dashed var(--linea); border-radius: 14px;
+    padding: 20px 22px; margin-bottom: 24px; }
+  .caja-nueva textarea { min-height: 120px; }
+  .punto { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--naranja); margin-left: 6px; vertical-align: middle; }
+"""
+
+NOV_JS = """
+try { localStorage.setItem("novedades_vista", document.body.dataset.ultimaNovedad || ""); } catch (e) {}
+
+const formNov = document.getElementById("formNovedad");
+if (formNov) formNov.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const s = document.getElementById("novStatus");
+  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Publicando…';
+  try {
+    const res = await fetch("/api/novedades", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ titulo: document.getElementById("novTitulo").value.trim(),
+                             texto: document.getElementById("novTexto").value.trim() }) });
+    if (!res.ok) throw new Error("No se pudo publicar.");
+    window.location.reload();
+  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+});
+
+document.querySelectorAll(".quitar").forEach(b => b.addEventListener("click", async () => {
+  if (!confirm("¿Borrar esta novedad?")) return;
+  const res = await fetch("/api/novedades/" + b.dataset.id, { method: "DELETE" });
+  if (res.ok) window.location.reload();
+}));
+"""
+
+
+def novedades_page(user: str) -> str:
+    filas = novedades_listar()
+    admin = not is_guest(user)
+
+    formulario = ""
+    if admin:
+        formulario = """<div class="caja-nueva">
+          <div class="label">Publicar una novedad</div>
+          <form id="formNovedad">
+            <div class="campo" style="margin-bottom:10px">
+              <input id="novTitulo" maxlength="150" required
+                placeholder="Ej: Ya puedes convertir un informe en anuncios y posts" aria-label="Título"></div>
+            <textarea id="novTexto" required maxlength="4000"
+              placeholder="Cuéntalo en términos de lo que la persona puede hacer ahora."></textarea>
+            <button class="submit" type="submit">Publicar</button>
+          </form>
+          <p id="novStatus" class="status"></p>
+        </div>"""
+
+    lista = ""
+    for n in filas:
+        quitar = (f'<button class="quitar" data-id="{n.get("id")}">Borrar</button>' if admin else "")
+        texto = (n.get("texto") or "").replace("<", "&lt;")
+        lista += f"""<div class="novedad">{quitar}
+          <h3>{(n.get('titulo') or '').replace('<', '&lt;')}</h3>
+          <div class="fecha">{(n.get('creado') or '')[:10]}</div>
+          <div class="cuerpo">{texto}</div></div>"""
+    if not lista:
+        lista = '<p class="empty">Todavía no hay novedades publicadas.</p>'
+
+    contenido = f"""<h1>Novedades</h1>
+      <p class="intro">Lo último que se ha sumado a TΛLENO OS.</p>
+      {formulario}{lista}"""
+    return page("Novedades · TΛLENO OS", contenido, user, "novedades", NOV_CSS, NOV_JS)
+
+
 def brain_page(slug: str, user: str) -> str:
     if slug == "copy":
         return copy_page(user)
@@ -2442,6 +2569,39 @@ async def ver_leads(request: Request):
     if not user or is_guest(user):
         return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
     return HTMLResponse(leads_page(user))
+
+
+class NovedadRequest(BaseModel):
+    titulo: str = Field(..., min_length=3, max_length=150)
+    texto: str = Field(..., min_length=3, max_length=4000)
+
+
+@app.get("/novedades", response_class=HTMLResponse)
+async def ver_novedades(request: Request):
+    user = current_user(request)
+    if not user:
+        return HTMLResponse('<meta http-equiv="refresh" content="0; url=/login">')
+    return HTMLResponse(novedades_page(user))
+
+
+@app.post("/api/novedades")
+async def crear_novedad(req: NovedadRequest, user: str = Depends(require_user)):
+    if is_guest(user):
+        raise HTTPException(status_code=403, detail="Solo las cuentas pueden publicar novedades.")
+    nid = novedades_crear(req.titulo.strip(), req.texto.strip())
+    ULTIMA_NOVEDAD["revisado"] = 0.0      # fuerza refresco del aviso
+    if not nid:
+        raise HTTPException(status_code=502, detail="No se pudo guardar la novedad.")
+    return {"ok": True, "id": nid}
+
+
+@app.delete("/api/novedades/{id_novedad}")
+async def borrar_novedad(id_novedad: str, user: str = Depends(require_user)):
+    if is_guest(user):
+        raise HTTPException(status_code=403, detail="Solo las cuentas pueden borrar novedades.")
+    novedades_borrar(id_novedad)
+    ULTIMA_NOVEDAD["revisado"] = 0.0
+    return {"ok": True}
 
 
 @app.get("/actividad", response_class=HTMLResponse)
