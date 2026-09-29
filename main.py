@@ -2020,20 +2020,31 @@ def historial_page(user: str) -> str:
     return page("Historial · TΛLENO OS", contenido, user, "historial", RESULT_CSS + HIST_CSS)
 
 
+def _json_para_script(datos) -> str:
+    """JSON seguro dentro de <script>: un comentario con </script> rompía la página."""
+    crudo = json.dumps(datos, ensure_ascii=False)
+    return (crudo.replace("<", "\\u003c").replace(">", "\\u003e")
+                 .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
 def historial_detalle_page(user: str, fila: dict) -> str:
     agente = "Analista de Mercado" if fila.get("agente") == "mercado" else "Radar"
     fecha = (fila.get("creado") or "")[:16].replace("T", " ")
+    ajeno = fila.get("usuario") and fila.get("usuario") != user
+    volver = ('<a class="tab" href="/actividad">← Volver a actividad</a>'
+              if ajeno else '<a class="tab" href="/historial">← Volver al historial</a>')
+    de_quien = (f' · de {fila.get("usuario", "").replace(GUEST_PREFIX, "")}' if ajeno else "")
     contenido = f"""<h1>{fila.get('titulo') or 'Análisis'}</h1>
-      <p class="intro">{agente} · {fila.get('total_comentarios', 0)} comentarios · {fila.get('fuente','')} · {fecha}</p>
+      <p class="intro">{agente} · {fila.get('total_comentarios', 0)} comentarios · {fila.get('fuente','')} · {fecha}{de_quien}</p>
       <div class="barra-detalle">
-        <a class="tab" href="/historial">← Volver al historial</a>
+        {volver}
         <button type="button" class="borrar" id="borrarAnalisis" data-id="{fila.get('id')}">Borrar</button>
       </div>
       <div id="results"></div>
       <p class="pie-impresion">© {ANIO} Richard Taleno · Todos los derechos reservados · Generado con TΛLENO OS · Consultas: {CONTACT_EMAIL}</p>"""
     datos_dict = dict(fila.get("datos") or {})
     datos_dict["id_analisis"] = fila.get("id")
-    datos = json.dumps(datos_dict)
+    datos = _json_para_script(datos_dict)
     script = RENDER_JS.replace("__CONTACTO__", PIE_TEXTO) + f"""
 const DATOS = {datos};
 el("results").innerHTML = pintarSegunAgente(DATOS);
