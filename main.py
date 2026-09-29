@@ -2465,6 +2465,32 @@ document.querySelectorAll(".escribir").forEach(b => b.addEventListener("click", 
 """
 
 
+def _tema_limpio(etiqueta: str) -> str:
+    """Quita del tema lo que es del video y no del nicho: años, paréntesis, precios, emojis."""
+    t = re.sub(r"\([^)]*\)", " ", etiqueta or "")          # (2026), (parte 2)...
+    t = re.sub(r"\b(19|20)\d{2}\b", " ", t)                 # años sueltos
+    t = re.sub(r"(con\s+)?(solo\s+)?[$€]\s?\d[\d.,]*\s*(usd|dólares|dolares)?", " ", t, flags=re.I)  # precios
+    t = re.sub(r"[|!¡?¿#*_\"]+", " ", t)
+    t = re.sub(r"\s{2,}", " ", t).strip(" -–—.,:")
+    t = re.sub(r"^(c[oó]mo|que|qu[eé]|ideas para|tips para|gu[ií]a de|el|la|los|las)\s+", "", t, flags=re.I)
+    return (t[:1].lower() + t[1:]) if t else (etiqueta or "este tema")
+
+
+# La primera es para los nichos que buscó más de una persona; la segunda, para los de una sola.
+PLANTILLAS_NOVEDAD = [
+    ("Un buen tema para probar esta semana: {tema}",
+     "Si {tema} es tu nicho, o si te interesa, corre el Radar sobre ese tema. "
+     "Vas a ver los comentarios reales ordenados en dolores, objeciones y deseos, con las frases textuales.\n\n"
+     "Después pásalos al Analista y sabrás si ahí hay un producto que valga la pena crear, "
+     "o si conviene buscar en otro lado."),
+    ("Cómo investigar {tema} en 5 minutos",
+     "1. Escribe el tema en el Radar y elige 5 videos.\n"
+     "2. Lee los dolores y quédate con la frase que más se repite.\n"
+     "3. Manda los comentarios al Analista para saber si ahí hay un producto.\n\n"
+     "No necesitas encuestar a nadie: tu mercado ya lo escribió."),
+]
+
+
 def nichos_page(user: str) -> str:
     filas = material_listar(120)
     if not USA_SUPABASE:
@@ -2507,11 +2533,10 @@ def nichos_page(user: str) -> str:
             f'<a href="/historial/{f.get("id")}">{persona(f.get("usuario",""))}, {(f.get("creado") or "")[:10]}</a>'
             for f in g["analisis"][:6])
 
-        titulo_nov = f'Ya puedes analizar {g["etiqueta"].lower()} sin salir de la app'
-        texto_nov = (f'Varias personas están investigando {g["etiqueta"].lower()} estos días. '
-                     if caliente else f'Alguien acaba de investigar {g["etiqueta"].lower()}. ')
-        texto_nov += ("Si es tu nicho, el Radar te trae los comentarios reales de YouTube y el Analista "
-                      "te dice si ahí hay un producto que valga la pena crear.")
+        tema = _tema_limpio(g["etiqueta"])
+        plantilla = PLANTILLAS_NOVEDAD[0 if caliente else 1]
+        titulo_nov = plantilla[0].format(tema=tema, Tema=tema[:1].upper() + tema[1:])
+        texto_nov = plantilla[1].format(tema=tema, Tema=tema[:1].upper() + tema[1:])
 
         tarjetas += f"""<div class="nicho{' caliente' if caliente else ''}">
           <div class="cab"><span class="tema">{g['etiqueta']}</span>{sello}</div>
