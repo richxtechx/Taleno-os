@@ -49,7 +49,7 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
-APP_VERSION = "v14-nichos"      # se ve en /health, para saber qué versión está desplegada
+APP_VERSION = "v20-creditos-paquetes"      # se ve en /health, para saber qué versión está desplegada
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
 ANIO = datetime.now(timezone.utc).year
@@ -60,7 +60,9 @@ GUEST_PREFIX = "invitado:"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "1") != "0"   # ponlo en 0 solo para probar en local (http)
 GUEST_MODE = os.getenv("GUEST_MODE", "0") == "1"         # 1 = permite entrar sin cuenta
 GUEST_FULL = os.getenv("GUEST_FULL", "0") == "1"         # 1 = los invitados también pueden usar Facebook (cuesta Apify)
-GUEST_LIMIT = int(os.getenv("GUEST_LIMIT", "3"))         # análisis gratis por correo
+GUEST_LIMIT = int(os.getenv("GUEST_LIMIT", "3"))         # créditos de regalo al registrarse
+VENTA_URL = os.getenv("VENTA_URL", "")                   # página de venta de créditos (systeme.io)
+COSTO_CREDITOS = {"rapido": 0, "mercado": 1, "copy": 1}  # el Radar no gasta créditos
 COPY_GUEST_LIMIT = int(os.getenv("COPY_GUEST_LIMIT", "1"))  # piezas de copy gratis por correo
 GUEST_MODEL = os.getenv("GUEST_MODEL", "gemini-3.5-flash-lite")  # modelo barato para invitados
 DATA_DIR = os.getenv("DATA_DIR", "/tmp")                 # carpeta donde se guardan los leads
@@ -188,7 +190,8 @@ def _write_file_leads(data: dict):
 # --- API interna: igual para los dos almacenes ----------------------------
 def _lead_nuevo(email: str, nombre: str = "") -> dict:
     return {"email": email, "nombre": nombre, "creado": datetime.now(timezone.utc).isoformat(),
-            "usos": 0, "systeme": False, "feedback": []}
+            "usos": 0, "systeme": False, "feedback": [],
+            "creditos": GUEST_LIMIT, "ilimitado": False}
 
 
 def _read_leads() -> dict:
@@ -213,6 +216,43 @@ def _lead_upsert(lead: dict):
     data = _read_file_leads()
     data[lead["email"]] = lead
     _write_file_leads(data)
+
+
+def creditos_de(email: str) -> int:
+    lead = lead_get(email)
+    if not lead:
+        return GUEST_LIMIT
+    if lead.get("ilimitado"):
+        return -1                      # -1 = sin límite
+    return int(lead.get("creditos", GUEST_LIMIT) or 0)
+
+
+async def consumir_credito(email: str, cuantos: int = 1) -> int:
+    """Descuenta créditos y devuelve los que quedan (-1 si es ilimitado)."""
+    async with _leads_lock:
+        lead = lead_get(email) or _lead_nuevo(email)
+        if lead.get("ilimitado"):
+            return -1
+        lead["creditos"] = max(int(lead.get("creditos", GUEST_LIMIT) or 0) - cuantos, 0)
+        lead["usos"] = int(lead.get("usos", 0) or 0) + 1
+        lead["ultimo_uso"] = datetime.now(timezone.utc).isoformat()
+        _lead_upsert(lead)
+        return lead["creditos"]
+
+
+async def cargar_creditos(email: str, cuantos: int) -> int:
+    async with _leads_lock:
+        lead = lead_get(email) or _lead_nuevo(email)
+        lead["creditos"] = max(int(lead.get("creditos", 0) or 0) + cuantos, 0)
+        _lead_upsert(lead)
+        return lead["creditos"]
+
+
+async def marcar_ilimitado(email: str, valor: bool):
+    async with _leads_lock:
+        lead = lead_get(email) or _lead_nuevo(email)
+        lead["ilimitado"] = valor
+        _lead_upsert(lead)
 
 
 def lead_usos(email: str) -> int:
@@ -551,15 +591,19 @@ def block_guest(user: str):
         raise HTTPException(status_code=403, detail="La fuente de Facebook está disponible solo para cuentas. Usa YouTube o pega los comentarios.")
 
 
-def check_quota(user: str):
-    """Corta al invitado que ya gastó sus pruebas gratis, ANTES de llamar a la IA."""
+SIN_CREDITOS = ("Se te acabaron los créditos. El Radar sigue gratis y sin límite: "
+                "puedes seguir extrayendo y ordenando comentarios. "
+                "El Analista y el Copy necesitan créditos.")
+
+
+def check_quota(user: str, modo: str = "rapido"):
+    """El Radar es libre. El Analista y el Copy gastan un crédito."""
     if not is_guest(user):
         return
-    if lead_usos(guest_email(user)) >= GUEST_LIMIT:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Ya usaste tus {GUEST_LIMIT} análisis de prueba. Escríbeme y te doy acceso completo.",
-        )
+    if COSTO_CREDITOS.get(modo, 1) == 0:
+        return
+    if creditos_de(guest_email(user)) == 0:
+        raise HTTPException(status_code=402, detail=SIN_CREDITOS)
 
 
 def usos_copy(user: str) -> int:
@@ -573,14 +617,7 @@ def usos_copy(user: str) -> int:
 
 
 def check_quota_copy(user: str):
-    if not is_guest(user):
-        return
-    if usos_copy(user) >= COPY_GUEST_LIMIT:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Ya usaste tu pieza de prueba del agente Copy ({COPY_GUEST_LIMIT} por cuenta). "
-                   "Escríbeme si quieres acceso completo.",
-        )
+    check_quota(user, "copy")
 
 
 def modelo_para(user: str) -> Optional[str]:
@@ -1238,6 +1275,7 @@ BASE_CSS = """
   .btn-sesion { font: 600 14px inherit; text-decoration: none; padding: 9px 16px;
     border-radius: 10px; border: 1.5px solid var(--linea); color: var(--gris); background: var(--papel); }
   .btn-sesion.primario { background: var(--naranja); border-color: var(--naranja); color: #fff; }
+  .chip.compra { text-decoration: none; }
   .chip { font-size: 12px; font-weight: 700; color: var(--naranja); background: #fff1e9;
     border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
 
@@ -1376,6 +1414,10 @@ RESULT_CSS = """
   .nota { color: var(--gris); font-size: 13px; }
   .ajuste { color: var(--objecion); font-size: 14px; background: #fff8e8; border-radius: 10px; padding: 10px 14px; }
   .copiar-bloque { padding: 6px 12px; font-size: 13px; }
+  .sin-creditos { background: var(--papel); border: 2px solid var(--naranja); border-radius: 16px;
+    padding: 24px; margin-top: 8px; }
+  .sin-creditos h2 { margin: 0 0 10px; font-size: 20px; }
+  .sin-creditos p { margin: 0 0 12px; }
   .fbbox { margin-top: 36px; background: var(--papel); border: 1px dashed var(--linea); border-radius: 16px; padding: 22px; }
   .fbbox textarea { min-height: 90px; margin-top: 12px; }
   .fbrow { display: flex; gap: 8px; margin-top: 12px; }
@@ -1446,8 +1488,15 @@ def topbar(user: Optional[str], con_lateral: bool, mostrar_entrar: bool = True) 
         inicial = (nombre[:1] or "?").upper()
         etiqueta = ""
         if is_guest(user):
-            restantes = max(GUEST_LIMIT - lead_usos(guest_email(user)), 0)
-            etiqueta = f'<span class="chip">{restantes} de {GUEST_LIMIT}</span>'
+            saldo = creditos_de(guest_email(user))
+            if saldo < 0:
+                etiqueta = '<span class="chip">Acceso completo</span>'
+            elif saldo == 0 and VENTA_URL:
+                etiqueta = f'<a class="chip compra" href="{VENTA_URL}" target="_blank" rel="noopener">Sin créditos · Recargar</a>'
+            elif saldo == 0:
+                etiqueta = '<span class="chip">Sin créditos</span>'
+            else:
+                etiqueta = f'<span class="chip">{saldo} crédito{"s" if saldo != 1 else ""}</span>'
         derecha = f"""<div class="usuario">{etiqueta}
           <span class="avatar">{inicial}</span>
           <span class="nombre-usuario">{nombre}</span>
@@ -2051,6 +2100,23 @@ LEADS_CSS = """
   .wrap { overflow-x: auto; }
   .fb { color: var(--gris); font-size: 13px; }
   .descarga { display: inline-block; margin-bottom: 16px; font-weight: 700; color: var(--naranja); text-decoration: none; }
+  .cargar { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
+  .mini { font: 600 12px inherit; padding: 5px 9px; border: 1px solid var(--linea); border-radius: 8px;
+    background: var(--papel); cursor: pointer; color: var(--gris); }
+  .mini:hover { border-color: var(--naranja); color: var(--naranja); }
+  .mini.inf { border-style: dashed; }
+"""
+
+LEADS_JS = """
+document.querySelectorAll(".mini").forEach(b => b.addEventListener("click", async () => {
+  const cuerpo = b.dataset.ilimitado !== undefined
+    ? { email: b.dataset.email, ilimitado: b.dataset.ilimitado === "1" }
+    : { email: b.dataset.email, creditos: Number(b.dataset.n) };
+  b.disabled = true;
+  const res = await fetch("/api/creditos", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cuerpo) });
+  if (res.ok) window.location.reload(); else { b.disabled = false; alert("No se pudo actualizar."); }
+}));
 """
 
 
@@ -2063,16 +2129,24 @@ def leads_page(user: str) -> str:
             for f in l.get("feedback", [])
         ) or "<span class='fb'>Sin feedback</span>"
         sync = "✓ en systeme.io" if l.get("systeme") else ("· solo local" if SYSTEME_API_KEY else "")
-        filas += f"""<tr><td>{l.get('nombre','')}<br><span class="fb">{l.get('email','')}</span><br>
+        correo = l.get('email', '')
+        saldo = ("∞" if l.get("ilimitado") else int(l.get("creditos", 0) or 0))
+        botones = (f'<div class="cargar">'
+                   f'<button class="mini" data-email="{correo}" data-n="15">+15 ($7)</button>'
+                   f'<button class="mini" data-email="{correo}" data-n="45">+45 ($17)</button>'
+                   f'<button class="mini inf" data-email="{correo}" data-ilimitado="{"0" if l.get("ilimitado") else "1"}">'
+                   f'{"Quitar ∞" if l.get("ilimitado") else "∞"}</button></div>')
+        filas += f"""<tr><td>{l.get('nombre','')}<br><span class="fb">{correo}</span><br>
           <span class="fb">{sync}</span></td>
-          <td>{l.get('usos',0)} / {GUEST_LIMIT}</td><td>{l.get('creado','')[:10]}</td><td>{fb}</td></tr>"""
+          <td><strong>{saldo}</strong><br><span class="fb">{l.get('usos',0)} usos</span>{botones}</td>
+          <td>{l.get('creado','')[:10]}</td><td>{fb}</td></tr>"""
     if not filas:
         filas = '<tr><td colspan="4">Todavía no hay usuarios registrados.</td></tr>'
     contenido = f"""<h1>Usuarios</h1>
       <p class="intro">{len(leads)} usuarios registrados. El feedback que dejan aparece en la última columna.</p>
       <a class="descarga" href="/leads.csv">↓ Descargar CSV</a>
-      <div class="wrap"><table><tr><th>Persona</th><th>Usos</th><th>Desde</th><th>Feedback</th></tr>{filas}</table></div>"""
-    return page("Usuarios · TΛLENO OS", contenido, user, "leads", LEADS_CSS)
+      <div class="wrap"><table><tr><th>Persona</th><th>Créditos</th><th>Desde</th><th>Feedback</th></tr>{filas}</table></div>"""
+    return page("Usuarios · TΛLENO OS", contenido, user, "leads", LEADS_CSS, LEADS_JS)
 
 
 HIST_CSS = """
@@ -2219,6 +2293,11 @@ if (pre) { const sel = el("analisis"); if ([...sel.options].some(o => o.value ==
 
 def copy_page(user: str) -> str:
     c = CEREBROS["copy"]
+    if is_guest(user) and creditos_de(guest_email(user)) == 0:
+        cuerpo = (f"<h1>{c['nombre']}</h1><p class=\"intro\">{c['desc']}</p>"
+                  + panel_sin_creditos("El agente Copy")
+                  + '<p style="margin-top:18px"><a class="tab" href="/cerebro/radar">← Volver al Radar</a></p>')
+        return page("Copy · TΛLENO OS", cuerpo, user, "copy", RESULT_CSS)
     informes = [f for f in historial_listar(user, 30) if f.get("agente") == "mercado"]
     if not informes:
         aviso = ('<p class="empty">Todavía no tienes informes del Analista de Mercado. '
@@ -2560,10 +2639,30 @@ def nichos_page(user: str) -> str:
     return page("Nichos · TΛLENO OS", contenido, user, "nichos", NICHOS_CSS, NICHOS_JS)
 
 
+def panel_sin_creditos(agente: str) -> str:
+    boton = (f'<a class="submit" style="display:inline-block;text-decoration:none" href="{VENTA_URL}" '
+             f'target="_blank" rel="noopener">Ver paquetes</a>' if VENTA_URL else "")
+    return f"""<div class="sin-creditos">
+      <h2>Se te acabaron los créditos</h2>
+      <p>El <strong>Radar sigue gratis y sin límite</strong>: puedes seguir trayendo comentarios de YouTube
+         y ordenándolos en dolores, objeciones y deseos.</p>
+      <p>{agente} necesita créditos. Con ellos conviertes esos comentarios en una decisión
+         y en contenido listo para publicar.</p>
+      {boton}
+      <p class="letra-chica">Una investigación completa (Analista + Copy) usa 2 créditos.</p>
+    </div>"""
+
+
 def brain_page(slug: str, user: str) -> str:
     if slug == "copy":
         return copy_page(user)
     c = CEREBROS[slug]
+    if (is_guest(user) and COSTO_CREDITOS.get(c["modo"], 1) > 0
+            and creditos_de(guest_email(user)) == 0):
+        cuerpo = (f"<h1>{c['nombre']}</h1><p class=\"intro\">{c['desc']}</p>"
+                  + panel_sin_creditos("El Analista de Mercado")
+                  + '<p style="margin-top:18px"><a class="tab" href="/cerebro/radar">← Volver al Radar</a></p>')
+        return page(f"{c['nombre']} · TΛLENO OS", cuerpo, user, slug, RESULT_CSS)
     etiquetas = {
         "paste": "Pegar comentarios",
         "yt-search": "Buscar en YouTube",
@@ -2649,7 +2748,8 @@ async def build_response(fuente, consulta, comments, modo, result, user,
                          videos=None, titulo=None) -> AnalyzeResponse:
     restantes = None
     if is_guest(user):
-        restantes = await lead_consumir_uso(guest_email(user))
+        cuantos = COSTO_CREDITOS.get(modo, 1)
+        restantes = await consumir_credito(guest_email(user), cuantos) if cuantos else creditos_de(guest_email(user))
     respuesta = AnalyzeResponse(
         fuente=fuente, consulta=consulta, total_comentarios=len(comments),
         modelo=GEMINI_MODEL, modo=modo, videos=videos or [], restantes=restantes,
@@ -2897,6 +2997,24 @@ async def actividad_csv(request: Request):
                     headers={"Content-Disposition": "attachment; filename=actividad.csv"})
 
 
+class CreditosRequest(BaseModel):
+    email: str
+    creditos: Optional[int] = None
+    ilimitado: Optional[bool] = None
+
+
+@app.post("/api/creditos")
+async def api_creditos(req: CreditosRequest, user: str = Depends(require_user)):
+    if is_guest(user):
+        raise HTTPException(status_code=403, detail="Solo las cuentas pueden cargar créditos.")
+    email = req.email.strip().lower()
+    if req.ilimitado is not None:
+        await marcar_ilimitado(email, req.ilimitado)
+    if req.creditos:
+        await cargar_creditos(email, int(req.creditos))
+    return {"ok": True, "creditos": creditos_de(email)}
+
+
 @app.get("/leads.csv")
 async def leads_csv(request: Request):
     user = current_user(request)
@@ -2938,7 +3056,7 @@ async def cerebro_view(slug: str, request: Request):
 
 @app.post("/paste", response_model=AnalyzeResponse)
 async def analyze_pasted(req: PasteRequest, user: str = Depends(require_user)):
-    check_quota(user)
+    check_quota(user, req.modo)
     comments = parse_pasted(req.texto)
     if len(comments) < 10:
         raise HTTPException(status_code=400, detail="Pega al menos 10 comentarios, uno por línea (lo ideal son 200-300).")
@@ -2973,10 +3091,11 @@ async def generar_copy(req: CopyRequest, user: str = Depends(require_user)):
     titulo_base = fila.get("titulo") or "Análisis"
     cuantas = len(resultado.piezas)
     etiqueta = "paquete de 5 formatos" if req.paquete else FORMATOS_COPY.get(req.formato, req.formato)
+    restantes = await consumir_credito(guest_email(user)) if is_guest(user) else None
     respuesta = AnalyzeResponse(
         fuente=f"Copy · {etiqueta}", consulta=titulo_base,
         total_comentarios=datos.get("total_comentarios", 0),
-        modelo=GEMINI_MODEL, modo="copy", copywriting=resultado,
+        modelo=GEMINI_MODEL, modo="copy", copywriting=resultado, restantes=restantes,
     )
     try:
         historial_guardar(usuario=user, agente="copy", titulo=f"Copy · {titulo_base}",
@@ -2991,7 +3110,7 @@ async def generar_copy(req: CopyRequest, user: str = Depends(require_user)):
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_facebook(req: AnalyzeRequest, user: str = Depends(require_user)):
     block_guest(user)
-    check_quota(user)
+    check_quota(user, req.modo)
     url = str(req.url)
     if "facebook.com" not in url and "fb.watch" not in url:
         raise HTTPException(status_code=400, detail="El enlace debe ser de Facebook.")
@@ -3004,7 +3123,7 @@ async def analyze_facebook(req: AnalyzeRequest, user: str = Depends(require_user
 
 @app.post("/youtube/video", response_model=AnalyzeResponse)
 async def analyze_youtube_video(req: AnalyzeRequest, user: str = Depends(require_user)):
-    check_quota(user)
+    check_quota(user, req.modo)
     _require_youtube_key()
     url = str(req.url)
     video_id = extract_video_id(url)
@@ -3026,7 +3145,7 @@ async def analyze_youtube_video(req: AnalyzeRequest, user: str = Depends(require
 
 @app.post("/youtube/search", response_model=AnalyzeResponse)
 async def analyze_youtube_search(req: YouTubeSearchRequest, user: str = Depends(require_user)):
-    check_quota(user)
+    check_quota(user, req.modo)
     _require_youtube_key()
     query = req.query.strip()
 
