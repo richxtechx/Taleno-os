@@ -49,7 +49,7 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
-APP_VERSION = "v24-registro-contrasena"      # se ve en /health, para saber qué versión está desplegada
+APP_VERSION = "v25-recuperar-clave"      # se ve en /health, para saber qué versión está desplegada
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
 ANIO = datetime.now(timezone.utc).year
@@ -62,6 +62,10 @@ GUEST_MODE = os.getenv("GUEST_MODE", "0") == "1"         # 1 = permite entrar si
 GUEST_FULL = os.getenv("GUEST_FULL", "0") == "1"         # 1 = los invitados también pueden usar Facebook (cuesta Apify)
 GUEST_LIMIT = int(os.getenv("GUEST_LIMIT", "3"))         # créditos de regalo al registrarse
 VENTA_URL = os.getenv("VENTA_URL", "")                   # página de venta de créditos (systeme.io)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")             # envío del correo de recuperación
+MAIL_FROM = os.getenv("MAIL_FROM", "TΛLENO OS <acceso@richardtaleno.com>")
+APP_URL = os.getenv("APP_URL", "https://taleno-app.onrender.com")
+MINUTOS_ENLACE = 30
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")             # envío del enlace de acceso
 MAIL_FROM = os.getenv("MAIL_FROM", "TΛLENO OS <acceso@richardtaleno.com>")
 APP_URL = os.getenv("APP_URL", "https://taleno-app.onrender.com")
@@ -589,6 +593,8 @@ async def systeme_sync(email: str, nombre: str) -> dict:
         return info
 
 
+recuperacion_signer = URLSafeTimedSerializer(SECRET_KEY, salt="recuperar")
+USA_CORREO = bool(RESEND_API_KEY)
 ITERACIONES = 120_000
 
 
@@ -615,6 +621,66 @@ async def guardar_clave(email: str, clave: str):
         lead = lead_get(email) or _lead_nuevo(email)
         lead["pass_hash"] = hash_clave(clave)
         _lead_upsert(lead)
+
+
+async def guardar_nonce(email: str, nonce: Optional[str]):
+    async with _leads_lock:
+        lead = lead_get(email)
+        if not lead:
+            return
+        lead["acceso_nonce"] = nonce
+        _lead_upsert(lead)
+
+
+def _correo_recuperacion(enlace: str, nombre: str) -> str:
+    saludo = f"Hola {nombre}," if nombre else "Hola,"
+    return f"""<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #0b0b0f; line-height: 1.5">
+      <p>{saludo}</p>
+      <p>Pediste cambiar tu contraseña de TΛLENO OS. Entra aquí y elige una nueva:</p>
+      <p style="margin: 24px 0"><a href="{enlace}">{enlace}</a></p>
+      <p>El enlace vale {MINUTOS_ENLACE} minutos y se usa una sola vez.</p>
+      <p style="font-size: 13px; color: #6b7280">Si no pediste el cambio, ignora este correo: tu contraseña sigue igual.</p>
+      <p style="margin-top: 24px">Richard Taleno</p>
+    </div>"""
+
+
+async def enviar_recuperacion(email: str) -> bool:
+    lead = lead_get(email)
+    if not lead or not RESEND_API_KEY:
+        return False
+    nonce = secrets.token_urlsafe(16)
+    await guardar_nonce(email, nonce)
+    token = recuperacion_signer.dumps({"email": email, "nonce": nonce})
+    enlace = f"{APP_URL.rstrip('/')}/recuperar?t={token}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={"from": MAIL_FROM, "to": [email],
+                      "subject": "Cambiar tu contraseña de TΛLENO OS",
+                      "html": _correo_recuperacion(enlace, lead.get("nombre", ""))},
+            )
+        if resp.status_code >= 400:
+            logger.warning("Resend %s: %s", resp.status_code, resp.text[:300])
+            return False
+        return True
+    except Exception:
+        logger.exception("Resend: error enviando la recuperación")
+        return False
+
+
+async def validar_recuperacion(token: str) -> Optional[str]:
+    try:
+        datos = recuperacion_signer.loads(token, max_age=MINUTOS_ENLACE * 60)
+    except Exception:
+        return None
+    email = (datos or {}).get("email", "").strip().lower()
+    nonce = (datos or {}).get("nonce")
+    lead = lead_get(email) if email else None
+    if not lead or not nonce or lead.get("acceso_nonce") != nonce:
+        return None
+    return email
 
 
 async def clave_temporal(email: str) -> Optional[str]:
@@ -2041,6 +2107,11 @@ LOGIN_CSS = """
   .invitado > span { display: block; font-weight: 700; margin-bottom: 12px; }
   .invitado .submit { background: var(--tinta); }
   .letra-chica { color: var(--gris); font-size: 12px; line-height: 1.5; margin: 14px 0 0; }
+  .olvide { margin: 12px 0 0; text-align: center; }
+  .olvide a { color: var(--gris); font-size: 13px; text-decoration: none; }
+  .olvide a:hover { color: var(--naranja); }
+  #cajaOlvide { margin-top: 12px; }
+  #cajaOlvide .submit { background: var(--tinta); }
   .acceso { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--linea); text-align: center; }
   .acceso a { color: var(--gris); font-size: 14px; text-decoration: none; }
   .acceso a:hover { color: var(--naranja); }
@@ -2071,6 +2142,32 @@ async function enviar(url, cuerpo, estado) {
     window.location.href = "/";
   } catch (err) { s.className = "status error"; s.textContent = err.message; }
 }
+
+const verOlvide = document.getElementById("verOlvide");
+if (verOlvide) verOlvide.addEventListener("click", (e) => {
+  e.preventDefault();
+  const caja = document.getElementById("cajaOlvide");
+  caja.hidden = !caja.hidden;
+  verOlvide.textContent = caja.hidden ? "¿Olvidaste tu contraseña?" : "Volver a entrar";
+  if (!caja.hidden) document.getElementById("oemail").focus();
+});
+
+const formOlvide = document.getElementById("olvide");
+if (formOlvide) formOlvide.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const s = document.getElementById("ostatus");
+  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Enviando…';
+  try {
+    const res = await fetch("/api/recuperar", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: document.getElementById("oemail").value.trim() }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo enviar.");
+    formOlvide.hidden = true;
+    s.className = "status aviso";
+    s.innerHTML = "📬 <strong>Si ese correo tiene cuenta, te llegó un enlace.</strong> " +
+      "Vale 30 minutos. Si no lo ves, revisa spam.";
+  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+});
 
 const form = document.getElementById("login");
 if (form) form.addEventListener("submit", (e) => {
@@ -2121,9 +2218,54 @@ def login_page(msg: str = "") -> str:
         <button class="submit" type="submit">Entrar</button>
       </form>
       <p id="status" class="status"></p>
+      <p class="olvide"><a href="#" id="verOlvide">¿Olvidaste tu contraseña?</a></p>
+      <div id="cajaOlvide" hidden>
+        <form id="olvide">
+          <div class="campo"><input id="oemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
+          <button class="submit" type="submit">Enviarme el enlace</button>
+        </form>
+        <p id="ostatus" class="status"></p>
+      </div>
       {registro}
     </div>"""
     return page("Entrar · TΛLENO OS", contenido, None, "", LOGIN_CSS, LOGIN_JS,
+                con_lateral=False, mostrar_entrar=False)
+
+
+NUEVA_CLAVE_JS = """
+document.getElementById("formNueva").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const s = document.getElementById("nstatus");
+  const p1 = document.getElementById("np1").value, p2 = document.getElementById("np2").value;
+  if (p1.length < 8) { s.className = "status error"; s.textContent = "Mínimo 8 caracteres."; return; }
+  if (p1 !== p2) { s.className = "status error"; s.textContent = "Las dos contraseñas no coinciden."; return; }
+  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Guardando…';
+  try {
+    const res = await fetch("/api/recuperar/confirmar", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: document.getElementById("token").value, password: p1 }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo guardar.");
+    window.location.href = "/";
+  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+});
+"""
+
+
+def nueva_clave_page(token: str, email: str) -> str:
+    contenido = f"""<div class="caja">
+      <h1>Elige una contraseña nueva</h1>
+      <p>Para la cuenta <strong>{email}</strong>.</p>
+      <form id="formNueva">
+        <input type="hidden" id="token" value="{token}">
+        <div class="campo"><input id="np1" type="password" required minlength="8"
+          placeholder="Contraseña nueva (mínimo 8)" aria-label="Contraseña nueva"></div>
+        <div class="campo"><input id="np2" type="password" required minlength="8"
+          placeholder="Repítela" aria-label="Repite la contraseña"></div>
+        <button class="submit" type="submit">Guardar y entrar</button>
+      </form>
+      <p id="nstatus" class="status"></p>
+    </div>"""
+    return page("Nueva contraseña · TΛLENO OS", contenido, None, "", LOGIN_CSS, NUEVA_CLAVE_JS,
                 con_lateral=False, mostrar_entrar=False)
 
 
@@ -2966,6 +3108,44 @@ async def crear_cuenta(req: RegistroRequest, response: Response):
         info = await systeme_sync(email, req.nombre.strip())
         await lead_marcar_systeme(email, info.get("contacto", False))
 
+    _abrir_sesion(response, email)
+    return {"ok": True}
+
+
+class RecuperarRequest(BaseModel):
+    email: str = Field(..., max_length=120)
+
+
+class NuevaClaveRequest(BaseModel):
+    token: str
+    password: str = Field(..., min_length=8, max_length=100)
+
+
+@app.post("/api/recuperar")
+async def pedir_recuperacion(req: RecuperarRequest):
+    email = req.email.strip().lower()
+    if not USA_CORREO:
+        raise HTTPException(status_code=503, detail="Escríbeme a richard@richardtaleno.com y te genero una contraseña nueva.")
+    if EMAIL_RE.match(email):
+        await enviar_recuperacion(email)          # si no existe, no decimos nada
+    return {"ok": True}
+
+
+@app.get("/recuperar", response_class=HTMLResponse)
+async def pagina_recuperar(t: str = ""):
+    email = await validar_recuperacion(t) if t else None
+    if not email:
+        return HTMLResponse(login_page("Ese enlace ya se usó o venció. Pide otro."), status_code=400)
+    return HTMLResponse(nueva_clave_page(t, email))
+
+
+@app.post("/api/recuperar/confirmar")
+async def confirmar_recuperacion(req: NuevaClaveRequest, response: Response):
+    email = await validar_recuperacion(req.token)
+    if not email:
+        raise HTTPException(status_code=400, detail="Ese enlace ya se usó o venció. Pide otro.")
+    await guardar_clave(email, req.password)
+    await guardar_nonce(email, None)
     _abrir_sesion(response, email)
     return {"ok": True}
 
