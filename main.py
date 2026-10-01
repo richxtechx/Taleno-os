@@ -1351,8 +1351,8 @@ CEREBROS = {
         "fuentes": ["yt-search", "yt-video", "facebook", "paste"],
     },
     "analista": {
-        "nombre": "Analista de Mercado",
-        "modo": "mercado",
+        "nombre": "Analista",
+        "modo": "analista",
         "lema": "Del dolor al producto, en 8 pasos",
         "desc": "Pega aquí los comentarios (o tráelos desde el Radar). Detecta el problema urgente específico, propone el producto con su mecanismo único y da un veredicto: crear o no crear.",
         "tiempo": "1 a 4 min",
