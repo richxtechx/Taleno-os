@@ -49,7 +49,7 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
-APP_VERSION = "v21-admin-usuarios"      # se ve en /health, para saber qué versión está desplegada
+APP_VERSION = "v22-salir-lateral"      # se ve en /health, para saber qué versión está desplegada
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
 ANIO = datetime.now(timezone.utc).year
@@ -1571,6 +1571,9 @@ def sidebar(user: str, activo: str = "") -> str:
                      f'<span class="tx">Nichos</span></a>')
     tele = (f'<a class="tele" href="{TELEGRAM_URL}" target="_blank" rel="noopener">✈ Canal de Telegram</a>'
             if TELEGRAM_URL else "")
+    items.append('<div class="empuje"></div>')
+    items.append('<a class="nav salir-nav" href="/logout">'
+                 '<span class="ic">⏻</span><span class="tx">Salir</span></a>')
     items.append(f'<div class="pie-lateral">{tele}'
                  f'<span>© {ANIO} Richard Taleno</span>'
                  f'<span>Todos los derechos reservados</span>'
