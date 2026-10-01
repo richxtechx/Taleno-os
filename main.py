@@ -49,7 +49,7 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
-APP_VERSION = "v20-creditos-paquetes"      # se ve en /health, para saber qué versión está desplegada
+APP_VERSION = "v21-admin-usuarios"      # se ve en /health, para saber qué versión está desplegada
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
 ANIO = datetime.now(timezone.utc).year
@@ -253,6 +253,24 @@ async def marcar_ilimitado(email: str, valor: bool):
         lead = lead_get(email) or _lead_nuevo(email)
         lead["ilimitado"] = valor
         _lead_upsert(lead)
+
+
+def lead_borrar(email: str, con_analisis: bool = True) -> dict:
+    """Borra el usuario y, si se pide, todos sus análisis."""
+    resultado = {"usuario": False, "analisis": 0}
+    if USA_SUPABASE:
+        if con_analisis:
+            filas = _sb_tabla("analisis", "GET", params={
+                "usuario": f"eq.{GUEST_PREFIX}{email}", "select": "id", "limit": 500})
+            resultado["analisis"] = len(filas)
+            _sb_tabla("analisis", "DELETE", params={"usuario": f"eq.{GUEST_PREFIX}{email}"})
+        _sb_tabla("leads", "DELETE", params={"email": f"eq.{email}"})
+        resultado["usuario"] = not _sb_ultimo_error["detalle"]
+    else:
+        data = _read_file_leads()
+        resultado["usuario"] = data.pop(email, None) is not None
+        _write_file_leads(data)
+    return resultado
 
 
 def lead_usos(email: str) -> int:
@@ -1283,6 +1301,14 @@ BASE_CSS = """
   .lateral { position: fixed; top: var(--barra-h); bottom: 0; left: 0; width: var(--lateral-w); z-index: 20;
     background: var(--papel); border-right: 1px solid var(--linea); padding: 16px 12px;
     display: flex; flex-direction: column; gap: 4px; overflow-y: auto; transition: width .18s, transform .18s; }
+  .ficha { display: flex; align-items: center; gap: 10px; padding: 8px 12px 14px;
+    border-bottom: 1px solid var(--linea); margin-bottom: 8px; }
+  .ficha .datos { display: flex; flex-direction: column; overflow: hidden; }
+  .ficha .correo { font-size: 12px; color: var(--gris); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.mini .ficha { justify-content: center; padding: 8px 0 14px; }
+  body.mini .ficha .datos { display: none; }
+  .salir-nav { margin-top: 8px; color: var(--gris); }
+  .salir-nav:hover { color: var(--no); }
   .grupo { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
     color: var(--gris); padding: 14px 12px 6px; }
   .nav { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px;
@@ -1294,7 +1320,8 @@ BASE_CSS = """
   .nav.mudo { color: var(--gris); font-weight: 400; cursor: default; }
   .punto { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     background: var(--naranja); margin-left: 6px; }
-  .pie-lateral { margin-top: auto; padding: 14px 12px; font-size: 12px; color: var(--gris);
+  .empuje { flex: 1; }
+  .pie-lateral { margin-top: 0; padding: 14px 12px; font-size: 12px; color: var(--gris);
     display: flex; flex-direction: column; gap: 4px; }
   .pie-lateral a { color: var(--gris); text-decoration: none; word-break: break-all; }
   .pie-lateral a:hover { color: var(--naranja); }
@@ -1481,26 +1508,23 @@ def _nombre_visible(user: str) -> str:
     return user.split("@")[0]
 
 
+def _chip_creditos(user: str) -> str:
+    """Etiqueta de saldo; vacía para las cuentas sin límite."""
+    if not is_guest(user):
+        return ""
+    saldo = creditos_de(guest_email(user))
+    if saldo < 0:
+        return '<span class="chip">Acceso completo</span>'
+    if saldo == 0:
+        return (f'<a class="chip compra" href="{VENTA_URL}" target="_blank" rel="noopener">Sin créditos · Recargar</a>'
+                if VENTA_URL else '<span class="chip">Sin créditos</span>')
+    return f'<span class="chip">{saldo} crédito{"s" if saldo != 1 else ""}</span>'
+
+
 def topbar(user: Optional[str], con_lateral: bool, mostrar_entrar: bool = True) -> str:
     hamb = '<button class="hamb" id="hamb" aria-label="Mostrar u ocultar el menú">☰</button>' if con_lateral else ""
     if user:
-        nombre = _nombre_visible(user)
-        inicial = (nombre[:1] or "?").upper()
-        etiqueta = ""
-        if is_guest(user):
-            saldo = creditos_de(guest_email(user))
-            if saldo < 0:
-                etiqueta = '<span class="chip">Acceso completo</span>'
-            elif saldo == 0 and VENTA_URL:
-                etiqueta = f'<a class="chip compra" href="{VENTA_URL}" target="_blank" rel="noopener">Sin créditos · Recargar</a>'
-            elif saldo == 0:
-                etiqueta = '<span class="chip">Sin créditos</span>'
-            else:
-                etiqueta = f'<span class="chip">{saldo} crédito{"s" if saldo != 1 else ""}</span>'
-        derecha = f"""<div class="usuario">{etiqueta}
-          <span class="avatar">{inicial}</span>
-          <span class="nombre-usuario">{nombre}</span>
-          <a class="btn-sesion" href="/logout">Salir</a></div>"""
+        derecha = f'<div class="usuario">{_chip_creditos(user)}</div>'
     elif mostrar_entrar:
         derecha = '<a class="btn-sesion primario" href="/login">Entrar</a>'
     else:
@@ -1511,8 +1535,14 @@ def topbar(user: Optional[str], con_lateral: bool, mostrar_entrar: bool = True) 
 
 
 def sidebar(user: str, activo: str = "") -> str:
-    items = ['<a class="nav" href="/" %s><span class="ic">▦</span><span class="tx">Panel</span></a>'
-             % ('aria-current="page"' if activo == "panel" else "")]
+    nombre = _nombre_visible(user)
+    inicial = (nombre[:1] or "?").upper()
+    correo = guest_email(user) if is_guest(user) else user
+    items = [f'<div class="ficha"><span class="avatar">{inicial}</span>'
+             f'<span class="datos"><span class="nombre-usuario">{nombre}</span>'
+             f'<span class="correo">{correo}</span></span></div>']
+    items.append('<a class="nav" href="/" %s><span class="ic">▦</span><span class="tx">Panel</span></a>'
+                 % ('aria-current="page"' if activo == "panel" else ""))
     items.append('<div class="grupo">Agentes</div>')
     iconos = {"radar": "◎", "analista": "⚑", "copy": "✎"}
     for slug, c in CEREBROS.items():
@@ -2019,16 +2049,16 @@ def login_page(msg: str = "") -> str:
     aviso = f'<p class="status error">{msg}</p>' if msg else ""
     if GUEST_MODE:
         contenido = f"""<div class="caja">
-          <h1>Empieza gratis</h1>
-          <p>Tus agentes de investigación de mercado, en un solo lugar.</p>
+          <h1>Entrar o empezar gratis</h1>
+          <p>Si ya usaste TΛLENO OS, entra con el mismo nombre y correo: tus créditos y tu historial siguen ahí.</p>
           {aviso}
           <form id="guest">
             <div class="campo"><input id="gnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
             <div class="campo"><input id="gemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
-            <button class="submit" type="submit">Probar gratis ({GUEST_LIMIT} análisis)</button>
+            <button class="submit" type="submit">Entrar</button>
           </form>
           <p id="gstatus" class="status"></p>
-          <p class="letra-chica">Tus análisis se guardan en tu cuenta. Revisamos el uso para mejorar los agentes. Sin spam.</p>
+          <p class="letra-chica">¿Primera vez? Te damos {GUEST_LIMIT} créditos para probar. El Radar es gratis siempre.<br>Tus análisis se guardan en tu cuenta. Revisamos el uso para mejorar los agentes. Sin spam.</p>
           <p class="acceso"><a href="#" id="verAdmin">¿Ya tienes cuenta? Entrar</a></p>
           <div id="cajaAdmin" hidden>
             <form id="login">
@@ -2105,13 +2135,38 @@ LEADS_CSS = """
     background: var(--papel); cursor: pointer; color: var(--gris); }
   .mini:hover { border-color: var(--naranja); color: var(--naranja); }
   .mini.inf { border-style: dashed; }
+  .mini.borrar-usuario:hover { border-color: var(--no); color: var(--no); }
+  tr[hidden] { display: none; }
 """
 
 LEADS_JS = """
+const buscador = document.getElementById("buscar");
+if (buscador) buscador.addEventListener("input", () => {
+  const q = buscador.value.trim().toLowerCase();
+  document.querySelectorAll("tr[data-buscar]").forEach(tr => {
+    tr.hidden = q !== "" && !tr.dataset.buscar.includes(q);
+  });
+});
+
 document.querySelectorAll(".mini").forEach(b => b.addEventListener("click", async () => {
-  const cuerpo = b.dataset.ilimitado !== undefined
-    ? { email: b.dataset.email, ilimitado: b.dataset.ilimitado === "1" }
-    : { email: b.dataset.email, creditos: Number(b.dataset.n) };
+  let cuerpo;
+  if (b.dataset.ilimitado !== undefined) {
+    cuerpo = { email: b.dataset.email, ilimitado: b.dataset.ilimitado === "1" };
+  } else if (b.dataset.otra) {
+    const n = prompt("¿Cuántos créditos? Usa un número negativo para quitar.", "10");
+    if (n === null || Number.isNaN(Number(n)) || Number(n) === 0) return;
+    cuerpo = { email: b.dataset.email, creditos: Number(n) };
+  } else if (b.classList.contains("borrar-usuario")) {
+    const nombre = b.dataset.nombre;
+    if (!confirm("¿Eliminar a " + nombre + "? Se borran también sus análisis guardados. No se puede deshacer.")) return;
+    if (prompt("Para confirmar, escribe BORRAR") !== "BORRAR") return;
+    b.disabled = true;
+    const r = await fetch("/api/usuarios/" + encodeURIComponent(b.dataset.email), { method: "DELETE" });
+    if (r.ok) window.location.reload(); else { b.disabled = false; alert("No se pudo eliminar."); }
+    return;
+  } else {
+    cuerpo = { email: b.dataset.email, creditos: Number(b.dataset.n) };
+  }
   b.disabled = true;
   const res = await fetch("/api/creditos", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(cuerpo) });
@@ -2134,9 +2189,12 @@ def leads_page(user: str) -> str:
         botones = (f'<div class="cargar">'
                    f'<button class="mini" data-email="{correo}" data-n="15">+15 ($7)</button>'
                    f'<button class="mini" data-email="{correo}" data-n="45">+45 ($17)</button>'
+                   f'<button class="mini" data-email="{correo}" data-otra="1">Otra…</button>'
                    f'<button class="mini inf" data-email="{correo}" data-ilimitado="{"0" if l.get("ilimitado") else "1"}">'
-                   f'{"Quitar ∞" if l.get("ilimitado") else "∞"}</button></div>')
-        filas += f"""<tr><td>{l.get('nombre','')}<br><span class="fb">{correo}</span><br>
+                   f'{"Quitar ∞" if l.get("ilimitado") else "∞"}</button>'
+                   f'<button class="mini borrar-usuario" data-email="{correo}" '
+                   f'data-nombre="{(l.get("nombre") or correo)}">Eliminar</button></div>')
+        filas += f"""<tr data-buscar="{(l.get('nombre','') + ' ' + correo).lower()}"><td>{l.get('nombre','')}<br><span class="fb">{correo}</span><br>
           <span class="fb">{sync}</span></td>
           <td><strong>{saldo}</strong><br><span class="fb">{l.get('usos',0)} usos</span>{botones}</td>
           <td>{l.get('creado','')[:10]}</td><td>{fb}</td></tr>"""
@@ -2144,6 +2202,9 @@ def leads_page(user: str) -> str:
         filas = '<tr><td colspan="4">Todavía no hay usuarios registrados.</td></tr>'
     contenido = f"""<h1>Usuarios</h1>
       <p class="intro">{len(leads)} usuarios registrados. El feedback que dejan aparece en la última columna.</p>
+      <div class="row" style="margin-bottom:14px">
+        <input id="buscar" placeholder="Buscar por nombre o correo" aria-label="Buscar">
+      </div>
       <a class="descarga" href="/leads.csv">↓ Descargar CSV</a>
       <div class="wrap"><table><tr><th>Persona</th><th>Créditos</th><th>Desde</th><th>Feedback</th></tr>{filas}</table></div>"""
     return page("Usuarios · TΛLENO OS", contenido, user, "leads", LEADS_CSS, LEADS_JS)
@@ -2815,8 +2876,6 @@ async def entrar_invitado(req: GuestRequest, response: Response):
     email = req.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Escribe un correo válido.")
-    if lead_usos(email) >= GUEST_LIMIT:
-        raise HTTPException(status_code=429, detail=f"Ese correo ya usó sus {GUEST_LIMIT} análisis de prueba.")
     await lead_guardar(email, req.nombre.strip())
     info = await systeme_sync(email, req.nombre.strip())
     await lead_marcar_systeme(email, info.get("contacto", False))
@@ -3013,6 +3072,15 @@ async def api_creditos(req: CreditosRequest, user: str = Depends(require_user)):
     if req.creditos:
         await cargar_creditos(email, int(req.creditos))
     return {"ok": True, "creditos": creditos_de(email)}
+
+
+@app.delete("/api/usuarios/{email}")
+async def api_borrar_usuario(email: str, user: str = Depends(require_user)):
+    if is_guest(user):
+        raise HTTPException(status_code=403, detail="Solo las cuentas pueden eliminar usuarios.")
+    resultado = lead_borrar(email.strip().lower())
+    logger.info("Usuario eliminado por %s: %s (%s análisis)", user, email, resultado["analisis"])
+    return {"ok": True, **resultado}
 
 
 @app.get("/leads.csv")
