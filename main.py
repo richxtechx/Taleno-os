@@ -49,7 +49,7 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
-APP_VERSION = "v23-enlace-acceso"      # se ve en /health, para saber qué versión está desplegada
+APP_VERSION = "v24-registro-contrasena"      # se ve en /health, para saber qué versión está desplegada
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
 ANIO = datetime.now(timezone.utc).year
@@ -589,73 +589,41 @@ async def systeme_sync(email: str, nombre: str) -> dict:
         return info
 
 
-enlace_signer = URLSafeTimedSerializer(SECRET_KEY, salt="acceso")
-USA_ENLACE = bool(RESEND_API_KEY)
+ITERACIONES = 120_000
 
 
-async def guardar_nonce(email: str, nonce: Optional[str]):
+def hash_clave(clave: str, sal: Optional[str] = None) -> str:
+    """Guardamos la contraseña cifrada, nunca en texto plano."""
+    import hashlib
+    sal = sal or secrets.token_hex(16)
+    derivada = hashlib.pbkdf2_hmac("sha256", clave.encode("utf-8"), sal.encode("utf-8"), ITERACIONES)
+    return f"pbkdf2${ITERACIONES}${sal}${derivada.hex()}"
+
+
+def clave_correcta(clave: str, guardado: str) -> bool:
+    try:
+        _, iteraciones, sal, _ = guardado.split("$")
+        import hashlib
+        derivada = hashlib.pbkdf2_hmac("sha256", clave.encode("utf-8"), sal.encode("utf-8"), int(iteraciones))
+        return secrets.compare_digest(f"pbkdf2${iteraciones}${sal}${derivada.hex()}", guardado)
+    except Exception:
+        return False
+
+
+async def guardar_clave(email: str, clave: str):
     async with _leads_lock:
         lead = lead_get(email) or _lead_nuevo(email)
-        lead["acceso_nonce"] = nonce
+        lead["pass_hash"] = hash_clave(clave)
         _lead_upsert(lead)
 
 
-def _correo_acceso(enlace: str, nombre: str) -> str:
-    saludo = f"Hola {nombre}," if nombre else "Hola,"
-    return f"""<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #0b0b0f; line-height: 1.5">
-      <p>{saludo}</p>
-      <p>Toca el botón para entrar a TΛLENO OS. El enlace vale {MINUTOS_ENLACE} minutos y se usa una sola vez.</p>
-      <p style="margin: 28px 0">
-        <a href="{enlace}" style="background:#ff6b2b;color:#ffffff;text-decoration:none;
-           padding:14px 26px;border-radius:10px;font-weight:bold;display:inline-block">Entrar a TΛLENO OS</a>
-      </p>
-      <p style="font-size:13px;color:#6b7280">Si el botón no funciona, copia esta dirección en tu navegador:<br>{enlace}</p>
-      <p style="font-size:13px;color:#6b7280">Si no pediste este acceso, ignora este correo: sin el enlace nadie puede entrar.</p>
-      <p style="margin-top:28px">Richard Taleno</p>
-    </div>"""
-
-
-async def enviar_enlace(email: str, nombre: str) -> bool:
-    """Crea un enlace de un solo uso y lo manda por correo con Resend."""
-    if not RESEND_API_KEY:
-        return False
-    nonce = secrets.token_urlsafe(16)
-    await guardar_nonce(email, nonce)
-    token = enlace_signer.dumps({"email": email, "nonce": nonce})
-    enlace = f"{APP_URL.rstrip('/')}/entrar?t={token}"
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-                json={"from": MAIL_FROM, "to": [email],
-                      "subject": "Tu acceso a TΛLENO OS",
-                      "html": _correo_acceso(enlace, nombre)},
-            )
-        if resp.status_code >= 400:
-            logger.warning("Resend %s: %s", resp.status_code, resp.text[:300])
-            return False
-        return True
-    except Exception:
-        logger.exception("Resend: error enviando el enlace")
-        return False
-
-
-async def validar_enlace(token: str) -> Optional[str]:
-    """Devuelve el correo si el enlace es válido, y lo invalida."""
-    try:
-        datos = enlace_signer.loads(token, max_age=MINUTOS_ENLACE * 60)
-    except Exception:
+async def clave_temporal(email: str) -> Optional[str]:
+    """Genera una contraseña nueva para alguien que la perdió."""
+    if not lead_get(email):
         return None
-    email = (datos or {}).get("email", "").strip().lower()
-    nonce = (datos or {}).get("nonce")
-    if not email or not nonce:
-        return None
-    lead = lead_get(email)
-    if not lead or lead.get("acceso_nonce") != nonce:
-        return None
-    await guardar_nonce(email, None)
-    return email
+    nueva = secrets.token_urlsafe(6)
+    await guardar_clave(email, nueva)
+    return nueva
 
 
 def is_guest(user: Optional[str]) -> bool:
@@ -2082,84 +2050,79 @@ LOGIN_CSS = """
 
 
 LOGIN_JS = """
-const guest = document.getElementById("guest");
-if (guest) guest.addEventListener("submit", async (e) => {
+const verRegistro = document.getElementById("verRegistro");
+if (verRegistro) verRegistro.addEventListener("click", (e) => {
   e.preventDefault();
-  const s = document.getElementById("gstatus");
-  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Preparando tu prueba…';
-  try {
-    const res = await fetch("/api/invitado", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nombre: document.getElementById("gnombre").value.trim(), email: document.getElementById("gemail").value.trim() }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo entrar.");
-    window.location.href = "/";
-  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+  const caja = document.getElementById("cajaRegistro");
+  caja.hidden = !caja.hidden;
+  verRegistro.textContent = caja.hidden ? "¿Primera vez? Crear cuenta gratis" : "Ya tengo cuenta";
+  if (!caja.hidden) document.getElementById("rnombre").focus();
 });
 
-const verAdmin = document.getElementById("verAdmin");
-if (verAdmin) verAdmin.addEventListener("click", (e) => {
-  e.preventDefault();
-  const caja = document.getElementById("cajaAdmin");
-  caja.hidden = !caja.hidden;
-  verAdmin.textContent = caja.hidden ? "¿Ya tienes cuenta? Entrar" : "Volver a la prueba gratis";
-  if (!caja.hidden) document.getElementById("email").focus();
-});
+async function enviar(url, cuerpo, estado) {
+  const s = document.getElementById(estado);
+  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Un momento…';
+  try {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cuerpo) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail
+      : (Array.isArray(data.detail) && data.detail[0] ? data.detail[0].msg : "No se pudo entrar."));
+    window.location.href = "/";
+  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+}
 
 const form = document.getElementById("login");
-if (form) form.addEventListener("submit", async (e) => {
+if (form) form.addEventListener("submit", (e) => {
   e.preventDefault();
-  const s = document.getElementById("status");
-  s.className = "status"; s.innerHTML = '<span class="spinner"></span>Entrando…';
-  try {
-    const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: document.getElementById("email").value.trim(), password: document.getElementById("password").value }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "No se pudo entrar.");
-    window.location.href = "/";
-  } catch (err) { s.className = "status error"; s.textContent = err.message; }
+  enviar("/api/login", { email: document.getElementById("email").value.trim(),
+                         password: document.getElementById("password").value }, "status");
+});
+
+const formReg = document.getElementById("registro");
+if (formReg) formReg.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const pass = document.getElementById("rpass").value;
+  if (pass.length < 8) {
+    const s = document.getElementById("rstatus");
+    s.className = "status error"; s.textContent = "La contraseña necesita al menos 8 caracteres.";
+    return;
+  }
+  enviar("/api/registro", { nombre: document.getElementById("rnombre").value.trim(),
+                            email: document.getElementById("remail").value.trim(),
+                            password: pass }, "rstatus");
 });
 """
 
 
 def login_page(msg: str = "") -> str:
     aviso = f'<p class="status error">{msg}</p>' if msg else ""
-    boton_acceso = "Enviarme el enlace de acceso" if USA_ENLACE else "Entrar"
-    como_entra = ("Te mando un enlace a tu correo para entrar, sin contraseñas."
-                  if USA_ENLACE else "Nombre y correo, sin contraseña.")
-    if GUEST_MODE:
-        contenido = f"""<div class="caja">
-          <h1>Entrar o empezar gratis</h1>
-          <p>{como_entra} Si ya usaste TΛLENO OS, usa el mismo correo: tus créditos y tu historial siguen ahí.</p>
-          {aviso}
-          <form id="guest">
-            <div class="campo"><input id="gnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
-            <div class="campo"><input id="gemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
-            <button class="submit" type="submit">{boton_acceso}</button>
-          </form>
-          <p id="gstatus" class="status"></p>
-          <p class="letra-chica">¿Primera vez? Te damos {GUEST_LIMIT} créditos para probar. El Radar es gratis siempre.<br>Tus análisis se guardan en tu cuenta. Revisamos el uso para mejorar los agentes. Sin spam.</p>
-          <p class="acceso"><a href="#" id="verAdmin">¿Ya tienes cuenta? Entrar</a></p>
-          <div id="cajaAdmin" hidden>
-            <form id="login">
-              <div class="campo"><input id="email" type="email" required placeholder="Correo" aria-label="Correo"></div>
-              <div class="campo"><input id="password" type="password" required placeholder="Contraseña" aria-label="Contraseña"></div>
-              <button class="submit" type="submit">Entrar</button>
-            </form>
-            <p id="status" class="status"></p>
-          </div>
-        </div>"""
-    else:
-        contenido = f"""<div class="caja">
-          <h1>Entrar</h1>
-          <p>Tus agentes de investigación de mercado, en un solo lugar.</p>
-          {aviso}
-          <form id="login">
-            <div class="campo"><input id="email" type="email" required placeholder="Correo" aria-label="Correo"></div>
-            <div class="campo"><input id="password" type="password" required placeholder="Contraseña" aria-label="Contraseña"></div>
-            <button class="submit" type="submit">Entrar</button>
-          </form>
-          <p id="status" class="status"></p>
-        </div>"""
+    registro = (f"""<p class="acceso"><a href="#" id="verRegistro">¿Primera vez? Crear cuenta gratis</a></p>
+      <div id="cajaRegistro" hidden>
+        <form id="registro">
+          <div class="campo"><input id="rnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
+          <div class="campo"><input id="remail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
+          <div class="campo"><input id="rpass" type="password" required minlength="8"
+            placeholder="Crea una contraseña (mínimo 8)" aria-label="Contraseña"></div>
+          <button class="submit" type="submit">Crear mi cuenta</button>
+        </form>
+        <p id="rstatus" class="status"></p>
+        <p class="letra-chica">Te damos {GUEST_LIMIT} créditos para probar. El Radar es gratis siempre.<br>
+          Tus análisis se guardan en tu cuenta. Revisamos el uso para mejorar los agentes. Sin spam.</p>
+      </div>""" if GUEST_MODE else "")
+
+    contenido = f"""<div class="caja">
+      <h1>Entrar</h1>
+      <p>Tus agentes de investigación de mercado, en un solo lugar.</p>
+      {aviso}
+      <form id="login">
+        <div class="campo"><input id="email" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
+        <div class="campo"><input id="password" type="password" required placeholder="Tu contraseña" aria-label="Contraseña"></div>
+        <button class="submit" type="submit">Entrar</button>
+      </form>
+      <p id="status" class="status"></p>
+      {registro}
+    </div>"""
     return page("Entrar · TΛLENO OS", contenido, None, "", LOGIN_CSS, LOGIN_JS,
                 con_lateral=False, mostrar_entrar=False)
 
@@ -2235,6 +2198,15 @@ document.querySelectorAll(".mini").forEach(b => b.addEventListener("click", asyn
     const n = prompt("¿Cuántos créditos? Usa un número negativo para quitar.", "10");
     if (n === null || Number.isNaN(Number(n)) || Number(n) === 0) return;
     cuerpo = { email: b.dataset.email, creditos: Number(n) };
+  } else if (b.dataset.clave) {
+    if (!confirm("¿Generar una contraseña nueva? La anterior dejará de servir.")) return;
+    b.disabled = true;
+    const r = await fetch("/api/usuarios/" + encodeURIComponent(b.dataset.email) + "/clave", { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    b.disabled = false;
+    if (r.ok) prompt("Contraseña nueva. Cópiala y mándasela:", d.clave);
+    else alert("No se pudo generar.");
+    return;
   } else if (b.classList.contains("borrar-usuario")) {
     const nombre = b.dataset.nombre;
     if (!confirm("¿Eliminar a " + nombre + "? Se borran también sus análisis guardados. No se puede deshacer.")) return;
@@ -2271,6 +2243,7 @@ def leads_page(user: str) -> str:
                    f'<button class="mini" data-email="{correo}" data-otra="1">Otra…</button>'
                    f'<button class="mini inf" data-email="{correo}" data-ilimitado="{"0" if l.get("ilimitado") else "1"}">'
                    f'{"Quitar ∞" if l.get("ilimitado") else "∞"}</button>'
+                   f'<button class="mini" data-email="{correo}" data-clave="1">Clave nueva</button>'
                    f'<button class="mini borrar-usuario" data-email="{correo}" '
                    f'data-nombre="{(l.get("nombre") or correo)}">Eliminar</button></div>')
         filas += f"""<tr data-buscar="{(l.get('nombre','') + ' ' + correo).lower()}"><td>{l.get('nombre','')}<br><span class="fb">{correo}</span><br>
@@ -2928,14 +2901,26 @@ async def login_view(request: Request):
 @app.post("/api/login")
 async def login_api(req: LoginRequest, response: Response):
     email = req.email.strip().lower()
-    esperado = USERS.get(email)
-    if not esperado or not secrets.compare_digest(esperado, req.password):
-        raise HTTPException(status_code=401, detail="Correo o contraseña incorrectos.")
-    response.set_cookie(
-        COOKIE_NAME, signer.dumps(email), max_age=SESSION_DAYS * 86400,
-        httponly=True, samesite="lax", secure=COOKIE_SECURE,
-    )
-    return {"ok": True}
+
+    esperado = USERS.get(email)                      # cuentas de administración
+    if esperado and secrets.compare_digest(esperado, req.password):
+        response.set_cookie(
+            COOKIE_NAME, signer.dumps(email), max_age=SESSION_DAYS * 86400,
+            httponly=True, samesite="lax", secure=COOKIE_SECURE,
+        )
+        return {"ok": True}
+
+    lead = lead_get(email)                           # cuentas de usuario
+    if lead and lead.get("pass_hash") and clave_correcta(req.password, lead["pass_hash"]):
+        _abrir_sesion(response, email)
+        return {"ok": True}
+
+    if lead and not lead.get("pass_hash"):
+        raise HTTPException(
+            status_code=401,
+            detail="Tu cuenta es anterior a las contraseñas. Escríbeme y te genero una.",
+        )
+    raise HTTPException(status_code=401, detail="Correo o contraseña incorrectos.")
 
 
 class GuestRequest(BaseModel):
@@ -2955,38 +2940,34 @@ def _abrir_sesion(response: Response, email: str):
     )
 
 
-@app.post("/api/invitado")
-async def entrar_invitado(req: GuestRequest, response: Response):
+class RegistroRequest(BaseModel):
+    nombre: str = Field(..., min_length=2, max_length=80)
+    email: str = Field(..., max_length=120)
+    password: str = Field(..., min_length=8, max_length=100)
+
+
+@app.post("/api/registro")
+async def crear_cuenta(req: RegistroRequest, response: Response):
     if not GUEST_MODE:
-        raise HTTPException(status_code=403, detail="El acceso de invitado está desactivado.")
+        raise HTTPException(status_code=403, detail="El registro está cerrado por ahora.")
     email = req.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Escribe un correo válido.")
+    if email in USERS:
+        raise HTTPException(status_code=400, detail="Ese correo ya tiene cuenta. Entra con tu contraseña.")
 
-    nuevo = lead_get(email) is None
+    existente = lead_get(email)
+    if existente and existente.get("pass_hash"):
+        raise HTTPException(status_code=400, detail="Ese correo ya tiene cuenta. Entra con tu contraseña.")
+
     await lead_guardar(email, req.nombre.strip())
-    if nuevo:
+    await guardar_clave(email, req.password)
+    if not existente:
         info = await systeme_sync(email, req.nombre.strip())
         await lead_marcar_systeme(email, info.get("contacto", False))
 
-    if USA_ENLACE:
-        enviado = await enviar_enlace(email, req.nombre.strip())
-        if not enviado:
-            raise HTTPException(status_code=502, detail="No pude enviarte el correo. Inténtalo en un minuto o escríbeme.")
-        return {"ok": True, "enlace": True}
-
-    _abrir_sesion(response, email)      # sin Resend configurado, entra directo
-    return {"ok": True, "enlace": False}
-
-
-@app.get("/entrar", response_class=HTMLResponse)
-async def entrar_con_enlace(t: str = ""):
-    email = await validar_enlace(t) if t else None
-    if not email:
-        return HTMLResponse(login_page("Ese enlace ya se usó o venció. Pide uno nuevo."), status_code=400)
-    response = HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
     _abrir_sesion(response, email)
-    return response
+    return {"ok": True}
 
 
 @app.post("/api/feedback")
@@ -3175,6 +3156,16 @@ async def api_creditos(req: CreditosRequest, user: str = Depends(require_user)):
     if req.creditos:
         await cargar_creditos(email, int(req.creditos))
     return {"ok": True, "creditos": creditos_de(email)}
+
+
+@app.post("/api/usuarios/{email}/clave")
+async def api_reset_clave(email: str, user: str = Depends(require_user)):
+    if is_guest(user):
+        raise HTTPException(status_code=403, detail="Solo las cuentas pueden restablecer contraseñas.")
+    nueva = await clave_temporal(email.strip().lower())
+    if not nueva:
+        raise HTTPException(status_code=404, detail="No encontré ese usuario.")
+    return {"ok": True, "clave": nueva}
 
 
 @app.delete("/api/usuarios/{email}")
