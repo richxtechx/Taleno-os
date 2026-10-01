@@ -49,7 +49,7 @@ APIFY_ACTOR_ID = "apify/facebook-comments-scraper"
 YT_API = "https://www.googleapis.com/youtube/v3"
 
 APP_NAME = os.getenv("APP_NAME", "TΛLENO OS")
-APP_VERSION = "v22-salir-lateral"      # se ve en /health, para saber qué versión está desplegada
+APP_VERSION = "v23-enlace-acceso"      # se ve en /health, para saber qué versión está desplegada
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "richard@richardtaleno.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "")             # ej: https://t.me/tucanal
 ANIO = datetime.now(timezone.utc).year
@@ -62,6 +62,10 @@ GUEST_MODE = os.getenv("GUEST_MODE", "0") == "1"         # 1 = permite entrar si
 GUEST_FULL = os.getenv("GUEST_FULL", "0") == "1"         # 1 = los invitados también pueden usar Facebook (cuesta Apify)
 GUEST_LIMIT = int(os.getenv("GUEST_LIMIT", "3"))         # créditos de regalo al registrarse
 VENTA_URL = os.getenv("VENTA_URL", "")                   # página de venta de créditos (systeme.io)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")             # envío del enlace de acceso
+MAIL_FROM = os.getenv("MAIL_FROM", "TΛLENO OS <acceso@richardtaleno.com>")
+APP_URL = os.getenv("APP_URL", "https://taleno-app.onrender.com")
+MINUTOS_ENLACE = 15
 COSTO_CREDITOS = {"rapido": 0, "mercado": 1, "copy": 1}  # el Radar no gasta créditos
 COPY_GUEST_LIMIT = int(os.getenv("COPY_GUEST_LIMIT", "1"))  # piezas de copy gratis por correo
 GUEST_MODEL = os.getenv("GUEST_MODEL", "gemini-3.5-flash-lite")  # modelo barato para invitados
@@ -583,6 +587,75 @@ async def systeme_sync(email: str, nombre: str) -> dict:
         info["detalle"] = f"Error de conexión: {exc}"
         logger.exception("systeme.io: error enviando el contacto")
         return info
+
+
+enlace_signer = URLSafeTimedSerializer(SECRET_KEY, salt="acceso")
+USA_ENLACE = bool(RESEND_API_KEY)
+
+
+async def guardar_nonce(email: str, nonce: Optional[str]):
+    async with _leads_lock:
+        lead = lead_get(email) or _lead_nuevo(email)
+        lead["acceso_nonce"] = nonce
+        _lead_upsert(lead)
+
+
+def _correo_acceso(enlace: str, nombre: str) -> str:
+    saludo = f"Hola {nombre}," if nombre else "Hola,"
+    return f"""<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #0b0b0f; line-height: 1.5">
+      <p>{saludo}</p>
+      <p>Toca el botón para entrar a TΛLENO OS. El enlace vale {MINUTOS_ENLACE} minutos y se usa una sola vez.</p>
+      <p style="margin: 28px 0">
+        <a href="{enlace}" style="background:#ff6b2b;color:#ffffff;text-decoration:none;
+           padding:14px 26px;border-radius:10px;font-weight:bold;display:inline-block">Entrar a TΛLENO OS</a>
+      </p>
+      <p style="font-size:13px;color:#6b7280">Si el botón no funciona, copia esta dirección en tu navegador:<br>{enlace}</p>
+      <p style="font-size:13px;color:#6b7280">Si no pediste este acceso, ignora este correo: sin el enlace nadie puede entrar.</p>
+      <p style="margin-top:28px">Richard Taleno</p>
+    </div>"""
+
+
+async def enviar_enlace(email: str, nombre: str) -> bool:
+    """Crea un enlace de un solo uso y lo manda por correo con Resend."""
+    if not RESEND_API_KEY:
+        return False
+    nonce = secrets.token_urlsafe(16)
+    await guardar_nonce(email, nonce)
+    token = enlace_signer.dumps({"email": email, "nonce": nonce})
+    enlace = f"{APP_URL.rstrip('/')}/entrar?t={token}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={"from": MAIL_FROM, "to": [email],
+                      "subject": "Tu acceso a TΛLENO OS",
+                      "html": _correo_acceso(enlace, nombre)},
+            )
+        if resp.status_code >= 400:
+            logger.warning("Resend %s: %s", resp.status_code, resp.text[:300])
+            return False
+        return True
+    except Exception:
+        logger.exception("Resend: error enviando el enlace")
+        return False
+
+
+async def validar_enlace(token: str) -> Optional[str]:
+    """Devuelve el correo si el enlace es válido, y lo invalida."""
+    try:
+        datos = enlace_signer.loads(token, max_age=MINUTOS_ENLACE * 60)
+    except Exception:
+        return None
+    email = (datos or {}).get("email", "").strip().lower()
+    nonce = (datos or {}).get("nonce")
+    if not email or not nonce:
+        return None
+    lead = lead_get(email)
+    if not lead or lead.get("acceso_nonce") != nonce:
+        return None
+    await guardar_nonce(email, None)
+    return email
 
 
 def is_guest(user: Optional[str]) -> bool:
@@ -2050,15 +2123,18 @@ if (form) form.addEventListener("submit", async (e) => {
 
 def login_page(msg: str = "") -> str:
     aviso = f'<p class="status error">{msg}</p>' if msg else ""
+    boton_acceso = "Enviarme el enlace de acceso" if USA_ENLACE else "Entrar"
+    como_entra = ("Te mando un enlace a tu correo para entrar, sin contraseñas."
+                  if USA_ENLACE else "Nombre y correo, sin contraseña.")
     if GUEST_MODE:
         contenido = f"""<div class="caja">
           <h1>Entrar o empezar gratis</h1>
-          <p>Si ya usaste TΛLENO OS, entra con el mismo nombre y correo: tus créditos y tu historial siguen ahí.</p>
+          <p>{como_entra} Si ya usaste TΛLENO OS, usa el mismo correo: tus créditos y tu historial siguen ahí.</p>
           {aviso}
           <form id="guest">
             <div class="campo"><input id="gnombre" required placeholder="Tu nombre" aria-label="Nombre"></div>
             <div class="campo"><input id="gemail" type="email" required placeholder="Tu correo" aria-label="Correo"></div>
-            <button class="submit" type="submit">Entrar</button>
+            <button class="submit" type="submit">{boton_acceso}</button>
           </form>
           <p id="gstatus" class="status"></p>
           <p class="letra-chica">¿Primera vez? Te damos {GUEST_LIMIT} créditos para probar. El Radar es gratis siempre.<br>Tus análisis se guardan en tu cuenta. Revisamos el uso para mejorar los agentes. Sin spam.</p>
@@ -2872,6 +2948,13 @@ class FeedbackRequest(BaseModel):
     texto: str = Field("", max_length=1000)
 
 
+def _abrir_sesion(response: Response, email: str):
+    response.set_cookie(
+        COOKIE_NAME, signer.dumps(GUEST_PREFIX + email), max_age=SESSION_DAYS * 86400,
+        httponly=True, samesite="lax", secure=COOKIE_SECURE,
+    )
+
+
 @app.post("/api/invitado")
 async def entrar_invitado(req: GuestRequest, response: Response):
     if not GUEST_MODE:
@@ -2879,14 +2962,31 @@ async def entrar_invitado(req: GuestRequest, response: Response):
     email = req.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Escribe un correo válido.")
+
+    nuevo = lead_get(email) is None
     await lead_guardar(email, req.nombre.strip())
-    info = await systeme_sync(email, req.nombre.strip())
-    await lead_marcar_systeme(email, info.get("contacto", False))
-    response.set_cookie(
-        COOKIE_NAME, signer.dumps(GUEST_PREFIX + email), max_age=SESSION_DAYS * 86400,
-        httponly=True, samesite="lax", secure=COOKIE_SECURE,
-    )
-    return {"ok": True}
+    if nuevo:
+        info = await systeme_sync(email, req.nombre.strip())
+        await lead_marcar_systeme(email, info.get("contacto", False))
+
+    if USA_ENLACE:
+        enviado = await enviar_enlace(email, req.nombre.strip())
+        if not enviado:
+            raise HTTPException(status_code=502, detail="No pude enviarte el correo. Inténtalo en un minuto o escríbeme.")
+        return {"ok": True, "enlace": True}
+
+    _abrir_sesion(response, email)      # sin Resend configurado, entra directo
+    return {"ok": True, "enlace": False}
+
+
+@app.get("/entrar", response_class=HTMLResponse)
+async def entrar_con_enlace(t: str = ""):
+    email = await validar_enlace(t) if t else None
+    if not email:
+        return HTMLResponse(login_page("Ese enlace ya se usó o venció. Pide uno nuevo."), status_code=400)
+    response = HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
+    _abrir_sesion(response, email)
+    return response
 
 
 @app.post("/api/feedback")
